@@ -1,0 +1,6 @@
+defaults:
+  - data: synthetic
+  - model: persistence
+  - training: default
+  - tracking: local
+  - _self_
