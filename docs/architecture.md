@@ -62,3 +62,9 @@ DataSource -> immutable Raw artifacts
 Canonical radar dimensions are named `time`, `y`, and `x`. Source-specific concepts remain at adapter boundaries. Observation and prediction domains are intentionally independent. Prepared-store chunking is not fixed by the architecture and must be benchmarked against real access patterns and storage.
 
 DVC versions large data artifacts separately from Git. Machine-specific DVC remotes, including NAS paths or credentials, must not be committed.
+
+## Native RADKLIM-YW ingestion (0.3)
+
+The first real source adapter lives under `weather_radar_ml.data.dwd`. It acquires immutable monthly RADKLIM-YW 2017.002 archives, safely extracts selected daily members, and decodes native binary composites into the canonical radar domain.
+
+DWD-specific binary flags are deliberately separated from canonical provenance. `quality` answers whether a value is observed, missing, interpolated, or extrapolated by our pipeline; `source_flags` preserves source metadata such as secondary-data and clutter markings. Native 5-minute precipitation amounts are normalized to the canonical precipitation-rate unit `mm h-1` at the adapter boundary.

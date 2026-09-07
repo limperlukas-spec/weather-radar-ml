@@ -67,3 +67,18 @@ def test_quality_states_keep_imputation_distinguishable() -> None:
     assert ObservationQuality.OBSERVED != ObservationQuality.INTERPOLATED
     assert ObservationQuality.INTERPOLATED != ObservationQuality.EXTRAPOLATED
     assert ObservationQuality.MISSING != ObservationQuality.OBSERVED
+
+
+def test_frame_preserves_source_flags_separately_from_provenance() -> None:
+    flags = np.array([[0, 1], [2, 3]], dtype=np.uint8)
+    frame = RadarFrame(
+        timestamp=datetime(2026, 1, 1),
+        precipitation_rate=np.zeros((2, 2)),
+        quality=np.full((2, 2), ObservationQuality.OBSERVED, dtype=np.uint8),
+        grid=_grid(),
+        source_flags=flags,
+    )
+
+    dataset = frame.to_dataset()
+
+    np.testing.assert_array_equal(dataset["source_flags"].values[0], flags)

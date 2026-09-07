@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import xarray as xr
@@ -11,6 +11,7 @@ from weather_radar_ml.data.quality import ObservationQuality
 
 PRECIPITATION_VARIABLE = "precipitation_rate"
 QUALITY_VARIABLE = "quality"
+SOURCE_FLAGS_VARIABLE = "source_flags"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class RadarFrame:
     precipitation_rate: np.ndarray
     quality: np.ndarray
     grid: SpatialGrid
+    source_flags: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         expected_shape = (self.grid.y.size, self.grid.x.size)
@@ -45,6 +47,8 @@ class RadarFrame:
             raise ValueError("Precipitation shape does not match the spatial grid.")
         if self.quality.shape != expected_shape:
             raise ValueError("Quality shape does not match the spatial grid.")
+        if self.source_flags is not None and self.source_flags.shape != expected_shape:
+            raise ValueError("Source flags shape does not match the spatial grid.")
         valid_codes = np.array([item.value for item in ObservationQuality])
         if not np.isin(self.quality, valid_codes).all():
             raise ValueError("Quality contains an unknown provenance code.")
@@ -62,9 +66,18 @@ class RadarFrame:
                     ("time", "y", "x"),
                     self.quality[np.newaxis, ...].astype(np.uint8, copy=False),
                 ),
+                SOURCE_FLAGS_VARIABLE: (
+                    ("time", "y", "x"),
+                    (
+                        self.source_flags
+                        if self.source_flags is not None
+                        else np.zeros_like(self.quality, dtype=np.uint8)
+                    )[np.newaxis, ...],
+                    {"flag_masks": [1, 2], "flag_meanings": "secondary clutter"},
+                ),
             },
             coords={
-                "time": [np.datetime64(self.timestamp, "ns")],
+                "time": [np.datetime64(_naive_utc(self.timestamp), "ns")],
                 "y": self.grid.y,
                 "x": self.grid.x,
             },
@@ -116,3 +129,10 @@ def _same_grid(left: SpatialGrid, right: SpatialGrid) -> bool:
         and np.array_equal(left.x, right.x)
         and np.array_equal(left.y, right.y)
     )
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Normalize aware timestamps to UTC for xarray/NumPy storage."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)

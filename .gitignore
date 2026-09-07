@@ -10,7 +10,7 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
+.coverage*
 coverage.xml
 htmlcov/
 .mutmut-cache/
@@ -29,6 +29,18 @@ artifacts/
 
 # Local data artifacts (tracked through DVC when required)
 data/raw/**
+!data/raw/**/
 !data/raw/**/*.dvc
-data/canonical/
-data/prepared/
+
+data/canonical/**
+!data/canonical/**/
+!data/canonical/**/*.dvc
+
+data/prepared/**
+!data/prepared/**/
+!data/prepared/**/*.dvc
+!data/prepared/**/*.json
+
+data/reference/**
+!data/reference/**/
+!data/reference/**/*.dvc

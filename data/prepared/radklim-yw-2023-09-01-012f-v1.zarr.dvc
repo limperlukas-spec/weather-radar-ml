@@ -1,0 +1,6 @@
+outs:
+- md5: 5755b261e86961813f2ef258a2834be7.dir
+  size: 3722183
+  nfiles: 110
+  hash: md5
+  path: radklim-yw-2023-09-01-012f-v1.zarr

@@ -2,7 +2,7 @@
 
 A reproducible research framework for benchmarking radar-based weather forecasting strategies under consistent data and evaluation conditions.
 
-> **Status:** Foundation 0.1 — project infrastructure and research-quality guardrails.
+> **Status:** Data Foundation 0.3 — native RADKLIM-YW ingestion.
 
 ## Why this project exists
 
@@ -68,7 +68,7 @@ weather-radar-ml/
 
 ## Current scope
 
-Foundation 0.1 establishes the development environment, typed configuration boundary, test strategy, CI, documentation structure, and experiment configuration. It intentionally does **not** implement radar ingestion, evaluation metrics, or ML models yet.
+Data Foundation 0.3 adds the first real DWD RADKLIM-YW ingestion path on top of the canonical data model. Evaluation metrics and learned forecast models remain intentionally out of scope.
 
 ## Documentation
 
@@ -84,3 +84,14 @@ Apache License 2.0. See [`LICENSE`](LICENSE).
 ## Data lifecycle
 
 Data Foundation 0.2 uses an immutable `Raw -> Canonical -> Prepared -> ML Dataset` lifecycle. Canonical radar data is represented with typed domain objects and xarray; prepared training data uses Zarr. Dataset manifests plus DVC provide semantic and artifact-level reproducibility. See `docs/architecture.md` and ADRs 0004-0006.
+
+
+## Real RADKLIM-YW sample
+
+After the normal quality gate, a bounded real-data smoke test can be run explicitly:
+
+```bash
+uv run python scripts/ingest_radklim_yw_sample.py --date 2023-09-01 --frames 12
+```
+
+This downloads the authoritative monthly DWD archive (hundreds of MB), extracts the selected day, decodes only the requested first frames, writes prepared Zarr data, and creates a dataset manifest. Raw and prepared artifacts stay outside Git and can be tracked with DVC after validation.
