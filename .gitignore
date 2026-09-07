@@ -26,3 +26,9 @@ artifacts/
 .DS_Store
 .idea/
 .vscode/
+
+# Local data artifacts (tracked through DVC when required)
+data/raw/**
+!data/raw/**/*.dvc
+data/canonical/
+data/prepared/

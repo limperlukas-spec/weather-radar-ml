@@ -80,3 +80,7 @@ Foundation 0.1 establishes the development environment, typed configuration boun
 ## License
 
 Apache License 2.0. See [`LICENSE`](LICENSE).
+
+## Data lifecycle
+
+Data Foundation 0.2 uses an immutable `Raw -> Canonical -> Prepared -> ML Dataset` lifecycle. Canonical radar data is represented with typed domain objects and xarray; prepared training data uses Zarr. Dataset manifests plus DVC provide semantic and artifact-level reproducibility. See `docs/architecture.md` and ADRs 0004-0006.
