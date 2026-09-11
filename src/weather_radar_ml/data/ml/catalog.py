@@ -263,6 +263,28 @@ class SQLiteSampleCatalog:
             raise KeyError(sample_id)
         return _sample_from_row(row)
 
+    def get_spatial_window(self, window_id: int) -> SpatialWindowRecord:
+        """Return one persisted spatial window by its internal key."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, x, y, width, height, mode
+                FROM spatial_windows
+                WHERE id = ?
+                """,
+                (window_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(window_id)
+        return SpatialWindowRecord(
+            id=int(row["id"]),
+            x=int(row["x"]),
+            y=int(row["y"]),
+            width=int(row["width"]),
+            height=int(row["height"]),
+            mode=SpatialWindowMode(str(row["mode"])),
+        )
+
     def query(
         self,
         selection: SampleSelection | None = None,
