@@ -7,15 +7,13 @@ from torch import Tensor
 from weather_radar_ml.models.domain import ModelSpec
 
 
-def validate_forecast_batch(
+def validate_model_inputs(
     spec: ModelSpec,
     dynamic: Tensor,
-    target: Tensor,
     static: Tensor | None = None,
 ) -> None:
-    """Validate one batched sample against a model specification."""
+    """Validate model inputs without requiring forecast targets."""
     _require_5d(dynamic, "dynamic inputs")
-    _require_5d(target, "targets")
 
     batch, history, channels, height, width = dynamic.shape
     if history != spec.history_steps:
@@ -29,6 +27,20 @@ def validate_forecast_batch(
             f"expected {len(spec.dynamic_input_features)}, got {channels}."
         )
 
+    _validate_static(spec, static, batch=batch, height=height, width=width)
+
+
+def validate_forecast_batch(
+    spec: ModelSpec,
+    dynamic: Tensor,
+    target: Tensor,
+    static: Tensor | None = None,
+) -> None:
+    """Validate one batched sample against a model specification."""
+    validate_model_inputs(spec, dynamic, static)
+    _require_5d(target, "targets")
+
+    batch, _, _, height, width = dynamic.shape
     target_batch, forecast, target_channels, target_height, target_width = target.shape
     if target_batch != batch:
         raise ValueError("Dynamic inputs and targets must use the same batch size.")
@@ -44,8 +56,6 @@ def validate_forecast_batch(
         )
     if (target_height, target_width) != (height, width):
         raise ValueError("Dynamic inputs and targets must use the same spatial shape.")
-
-    _validate_static(spec, static, batch=batch, height=height, width=width)
 
 
 def validate_prediction(spec: ModelSpec, prediction: Tensor, target: Tensor) -> None:
