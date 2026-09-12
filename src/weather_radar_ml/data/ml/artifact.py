@@ -70,9 +70,9 @@ def build_ml_dataset_artifact(
     plan = plan_ml_dataset_artifact(
         config=config, source_checksums=source_checksums, output_root=output_root
     )
-    _validate_source_paths(config)
     if plan.paths.root.exists():
         return _load_existing(plan)
+    _validate_source_paths(config)
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
     tmp = Path(
