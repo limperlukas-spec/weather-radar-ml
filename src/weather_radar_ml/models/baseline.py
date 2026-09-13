@@ -14,15 +14,29 @@ class PersistenceForecast(nn.Module):
 
     Persistence is intentionally simple. It provides a deterministic weather
     forecasting benchmark that learned models should outperform. Target
-    features are selected by name from the dynamic input channels, so feature
-    order may differ between inputs and outputs.
+    features are selected from dynamic input channels by name unless an
+    explicit target-to-input mapping is supplied.
     """
 
-    def __init__(self, spec: ModelSpec) -> None:
+    def __init__(
+        self,
+        spec: ModelSpec,
+        *,
+        target_input_features: tuple[str, ...] | None = None,
+    ) -> None:
         super().__init__()
+        source_features = (
+            spec.target_features
+            if target_input_features is None
+            else target_input_features
+        )
+        if len(source_features) != len(spec.target_features):
+            raise ValueError(
+                "target_input_features must match the number of target features."
+            )
         missing = tuple(
             feature
-            for feature in spec.target_features
+            for feature in source_features
             if feature not in spec.dynamic_input_features
         )
         if missing:
@@ -32,8 +46,7 @@ class PersistenceForecast(nn.Module):
             )
         self._spec = spec
         indices = [
-            spec.dynamic_input_features.index(feature)
-            for feature in spec.target_features
+            spec.dynamic_input_features.index(feature) for feature in source_features
         ]
         self.register_buffer(
             "_target_indices",

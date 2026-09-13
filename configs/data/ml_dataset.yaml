@@ -1,0 +1,5 @@
+# Select with: data=ml_dataset and override the mandatory values below.
+name: ml_dataset
+catalog_path: ???
+source_paths: {}
+dataset: ???

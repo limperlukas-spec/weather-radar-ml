@@ -1,2 +1,4 @@
+enabled: false
 uri: ./mlruns
 experiment_name: weather-radar-ml
+artifact_path: run-artifact

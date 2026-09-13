@@ -4,3 +4,12 @@ defaults:
   - training: default
   - tracking: local
   - _self_
+
+name: weather-radar-ml
+
+output:
+  runs_root: runs
+
+hydra:
+  job:
+    chdir: false

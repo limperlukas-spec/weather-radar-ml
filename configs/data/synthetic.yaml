@@ -1,1 +1,12 @@
 name: synthetic
+train_samples: 8
+validation_samples: 4
+history_steps: 2
+forecast_steps: 1
+dynamic_input_features:
+  - rain
+static_input_features: []
+target_features:
+  - rain
+height: 8
+width: 8
