@@ -7,14 +7,14 @@ import json
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
 import torch
 from torch import nn
 from torch.optim import SGD, Adam, Optimizer
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 from weather_radar_ml.config.experiment import (
     ComponentConfig,
@@ -53,6 +53,11 @@ from weather_radar_ml.training.checkpoint import (
 )
 from weather_radar_ml.training.domain import ForecastBatch, TrainingHistory
 from weather_radar_ml.training.engine import ForecastTrainer
+from weather_radar_ml.training.forecast_artifact import (
+    ForecastArtifactBatch,
+    ForecastArtifactResult,
+    write_forecast_artifact,
+)
 from weather_radar_ml.training.losses import MeanSquaredForecastLoss
 from weather_radar_ml.training.reproducibility import configure_reproducibility
 from weather_radar_ml.training.run import create_run_metadata
@@ -288,6 +293,215 @@ def run_experiment(
         data.close()
 
 
+def write_reference_forecast_artifact(
+    config: RunConfig,
+    result: PipelineResult,
+    *,
+    qualitative_count: int = 8,
+) -> ForecastArtifactResult:
+    """Persist validation forecasts from one learned run's selected best checkpoint.
+
+    Version 0.6.5 materializes the validation split so the artifact contract can be
+    tested without consuming the final test benchmark. Version 0.6.6 can reuse the
+    same writer for the held-out test split once that runtime path is introduced.
+    """
+    if config.model.name != "unet":
+        raise ValueError("Reference forecast artifacts currently require model='unet'.")
+    if result.validation_research is None:
+        raise ValueError(
+            "Reference forecast artifacts require research evaluation results."
+        )
+
+    best_checkpoint = _checkpoint_by_role(result.artifact, "best")
+    data = _build_data_bundle(config)
+    try:
+        model = _build_model(config, data.spec)
+        optimizer = _build_optimizer(config, model)
+        if optimizer is None:
+            raise RuntimeError("The learned U-Net requires an optimizer.")
+        load_training_checkpoint(
+            best_checkpoint,
+            model=model,
+            optimizer=optimizer,
+            restore_rng_state=False,
+        )
+
+        persistence = PersistenceForecast(
+            data.spec,
+            target_input_features=_infer_persistence_mapping(config.data),
+        )
+        device = torch.device(config.training.device)
+        model.to(device)
+        persistence.to(device)
+        model.eval()
+        persistence.eval()
+
+        loader = DataLoader(
+            data.validation,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            num_workers=config.training.num_workers,
+        )
+        artifact_id = f"forecast-{result.artifact.root.name}-validation"
+        return write_forecast_artifact(
+            config.output.runs_root,
+            artifact_id=artifact_id,
+            spec=data.spec,
+            lead_minutes=tuple(
+                _forecast_step_minutes(config) * (index + 1)
+                for index in range(data.spec.forecast_steps)
+            ),
+            batches=_forecast_artifact_batches(
+                model=cast(ForecastModel, model),
+                persistence=persistence,
+                loader=loader,
+                device=device,
+            ),
+            split="validation",
+            provenance=_forecast_provenance(
+                config,
+                result,
+                best_checkpoint=best_checkpoint,
+            ),
+            qualitative_count=qualitative_count,
+        )
+    finally:
+        data.close()
+
+
+def _forecast_artifact_batches(
+    *,
+    model: ForecastModel,
+    persistence: PersistenceForecast,
+    loader: Iterable[object],
+    device: torch.device,
+) -> Iterable[ForecastArtifactBatch]:
+    with torch.no_grad():
+        for raw_batch in loader:
+            batch = _require_mapping(raw_batch, "forecast artifact batch")
+            dynamic = _require_tensor(batch.get("dynamic_inputs"), "dynamic_inputs").to(
+                device
+            )
+            target = _require_tensor(batch.get("targets"), "targets").to(device)
+            static_raw = batch.get("static_inputs")
+            static = (
+                None
+                if static_raw is None
+                else _require_tensor(static_raw, "static_inputs").to(device)
+            )
+            sample_ids = _require_sample_ids(batch.get("sample_id"))
+
+            prediction_log1p = model(log1p_precipitation(dynamic), static)
+            learned = inverse_log1p_precipitation(prediction_log1p).clamp_min(0.0)
+            baseline = persistence(dynamic, static)
+            valid = torch.isfinite(target)
+            if bool((valid & (target < 0.0)).any()):
+                raise ValueError(
+                    "Target precipitation must not be negative when valid."
+                )
+            for name, values in (
+                ("learned forecast", learned),
+                ("persistence forecast", baseline),
+            ):
+                if bool((valid & ~torch.isfinite(values)).any()):
+                    raise ValueError(f"{name} is non-finite on a valid target value.")
+                if bool((valid & (values < 0.0)).any()):
+                    raise ValueError(f"{name} must not be negative on valid targets.")
+
+            yield ForecastArtifactBatch(
+                sample_ids=sample_ids,
+                learned_mm_h=learned.detach().cpu().numpy(),
+                persistence_mm_h=baseline.detach().cpu().numpy(),
+                target_mm_h=target.detach().cpu().numpy(),
+                valid_mask=valid.detach().cpu().numpy(),
+            )
+
+
+def _forecast_provenance(
+    config: RunConfig,
+    result: PipelineResult,
+    *,
+    best_checkpoint: Path,
+) -> dict[str, object]:
+    manifest = _read_json_mapping(result.artifact.manifest)
+    persisted_config = _read_json_mapping(result.artifact.config)
+    run_payload = _require_mapping(manifest.get("run"), "run manifest metadata")
+    fingerprint = manifest.get("config_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        raise ValueError("Run manifest has no valid config_fingerprint.")
+
+    research = result.validation_research
+    if research is None:
+        raise ValueError("Forecast provenance requires validation research results.")
+
+    return {
+        "source_local_run_id": result.artifact.root.name,
+        "experiment_fingerprint": fingerprint,
+        "dataset": persisted_config.get("dataset"),
+        "model": persisted_config.get("model"),
+        "loss": persisted_config.get("loss"),
+        "optimizer": persisted_config.get("optimizer"),
+        "training": persisted_config.get("training"),
+        "seed": config.training.seed,
+        "best_epoch": result.history.best_epoch,
+        "best_validation_loss": result.history.best_validation_loss,
+        "stopped_early": result.history.stopped_early,
+        "run_environment": dict(run_payload),
+        "device": config.training.device,
+        "torch_cuda_version": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+        "checkpoint": {
+            "role": "best",
+            "path": best_checkpoint.relative_to(result.artifact.root).as_posix(),
+            "sha256": _sha256(best_checkpoint),
+        },
+        "validation_research": asdict(research),
+    }
+
+
+def _checkpoint_by_role(artifact: RunArtifactResult, role: str) -> Path:
+    expected = f"{role}.pt"
+    matches = tuple(path for path in artifact.checkpoints if path.name == expected)
+    if len(matches) != 1:
+        raise ValueError(
+            f"Run artifact must contain exactly one {expected!r} checkpoint."
+        )
+    return matches[0]
+
+
+def _read_json_mapping(path: Path) -> Mapping[str, object]:
+    payload: object = json.loads(path.read_text(encoding="utf-8"))
+    return _require_mapping(payload, str(path))
+
+
+def _require_mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{name} must be a string-keyed mapping.")
+    return cast(Mapping[str, object], value)
+
+
+def _require_tensor(value: object, name: str) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} must be a tensor.")
+    return value
+
+
+def _require_sample_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise TypeError("sample_id batch must be a non-empty sequence of strings.")
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        raise TypeError("sample_id batch must contain only non-empty strings.")
+    return tuple(item.strip() for item in value)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _evaluate_research(
     config: RunConfig,
     *,
@@ -298,6 +512,7 @@ def _evaluate_research(
     forecast_model = cast(ForecastModel, model)
     evaluator = ResearchForecastEvaluator(
         spec,
+        lead_step_minutes=_forecast_step_minutes(config),
         persistence_input_features=_infer_persistence_mapping(config.data),
     )
     device = torch.device(config.training.device)
@@ -315,6 +530,12 @@ def _evaluate_research(
                 target=batch.target,
             )
     return evaluator.compute()
+
+
+def _forecast_step_minutes(config: RunConfig) -> int:
+    if config.data.dataset is None:
+        return 5
+    return config.data.dataset.temporal.step_minutes
 
 
 def _experiment_config(config: RunConfig, data: _DataBundle) -> ExperimentConfig:

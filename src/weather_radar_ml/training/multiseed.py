@@ -30,10 +30,15 @@ from weather_radar_ml.tracking.mlflow import (
     finish_mlflow_parent_run,
     start_mlflow_parent_run,
 )
-from weather_radar_ml.training.pipeline import PipelineResult, run_experiment
+from weather_radar_ml.training.forecast_artifact import ForecastArtifactResult
+from weather_radar_ml.training.pipeline import (
+    PipelineResult,
+    run_experiment,
+    write_reference_forecast_artifact,
+)
 
 OFFICIAL_MULTI_SEEDS = (17, 42, 73)
-MULTI_SEED_ARTIFACT_FORMAT_VERSION = 1
+MULTI_SEED_ARTIFACT_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,7 @@ class MultiSeedResult:
     runs: tuple[SeedRun, ...]
     reference_seed: int
     artifact: MultiSeedArtifact
+    forecast_artifact: ForecastArtifactResult
     aggregates: Mapping[str, AggregateStatistic]
     tracking_parent: MlflowParentRunResult | None = None
 
@@ -144,12 +150,22 @@ def run_multiseed_experiment(
         runs = tuple(completed)
         reference_seed = _reference_seed(runs)
         aggregates = _aggregate_runs(runs)
+        reference = next(run for run in runs if run.seed == reference_seed)
+        reference_config = replace(
+            config,
+            training=replace(config.training, seed=reference_seed),
+        )
+        forecast_artifact = write_reference_forecast_artifact(
+            reference_config,
+            reference.result,
+        )
         artifact = _write_multiseed_artifact(
             config.output.runs_root,
             runs=runs,
             seeds=normalized_seeds,
             reference_seed=reference_seed,
             aggregates=aggregates,
+            forecast_artifact=forecast_artifact,
         )
 
         if parent is not None:
@@ -165,6 +181,7 @@ def run_multiseed_experiment(
             runs=runs,
             reference_seed=reference_seed,
             artifact=artifact,
+            forecast_artifact=forecast_artifact,
             aggregates=aggregates,
             tracking_parent=parent,
         )
@@ -304,6 +321,7 @@ def _write_multiseed_artifact(
     seeds: tuple[int, int, int],
     reference_seed: int,
     aggregates: Mapping[str, AggregateStatistic],
+    forecast_artifact: ForecastArtifactResult,
 ) -> MultiSeedArtifact:
     root = Path(runs_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -320,6 +338,7 @@ def _write_multiseed_artifact(
                 seeds=seeds,
                 reference_seed=reference_seed,
                 aggregates=aggregates,
+                forecast_artifact=forecast_artifact,
             ),
         )
         manifest_path = staging / "manifest.json"
@@ -350,6 +369,7 @@ def _summary_payload(
     seeds: tuple[int, int, int],
     reference_seed: int,
     aggregates: Mapping[str, AggregateStatistic],
+    forecast_artifact: ForecastArtifactResult,
 ) -> dict[str, object]:
     reference = next(run for run in runs if run.seed == reference_seed)
     return {
@@ -358,6 +378,12 @@ def _summary_payload(
         "seeds": list(seeds),
         "reference_seed": reference_seed,
         "reference_local_run_id": reference.result.artifact.root.name,
+        "reference_forecast_artifact": {
+            "artifact_id": forecast_artifact.root.name,
+            "artifact_fingerprint": forecast_artifact.fingerprint,
+            "split": forecast_artifact.split,
+            "sample_count": forecast_artifact.sample_count,
+        },
         "runs": [
             {
                 "seed": run.seed,

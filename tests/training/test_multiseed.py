@@ -24,6 +24,7 @@ from weather_radar_ml.evaluation.research import (
 )
 from weather_radar_ml.training.artifact import RunArtifactResult
 from weather_radar_ml.training.domain import EpochResult, TrainingHistory
+from weather_radar_ml.training.forecast_artifact import ForecastArtifactResult
 from weather_radar_ml.training.multiseed import (
     OFFICIAL_MULTI_SEEDS,
     run_multiseed_experiment,
@@ -161,12 +162,37 @@ def test_multiseed_runs_fixed_seeds_selects_median_and_writes_aggregates(
             validation_research=_research(maes[seed]),
         )
 
+    forecast_seeds: list[int] = []
+
+    def fake_forecast(
+        config: RunConfig,
+        result: PipelineResult,
+        *,
+        qualitative_count: int = 8,
+    ) -> ForecastArtifactResult:
+        assert qualitative_count == 8
+        forecast_seeds.append(config.training.seed)
+        root = tmp_path / "forecast-reference"
+        return ForecastArtifactResult(
+            root=root,
+            predictions=root / "predictions.zarr",
+            metadata=root / "metadata.json",
+            qualitative_samples=root / "qualitative-samples.json",
+            manifest=root / "manifest.json",
+            fingerprint="forecast-fingerprint",
+            sample_count=2,
+            split="validation",
+        )
+
     monkeypatch.setattr(multiseed, "run_experiment", fake_run)
+    monkeypatch.setattr(multiseed, "write_reference_forecast_artifact", fake_forecast)
 
     result = run_multiseed_experiment(_config(tmp_path / "runs"))
 
     assert seen == list(OFFICIAL_MULTI_SEEDS)
     assert result.reference_seed == 73
+    assert forecast_seeds == [73]
+    assert result.forecast_artifact.fingerprint == "forecast-fingerprint"
     best_loss = result.aggregates["best_validation_loss"]
     assert best_loss.mean == pytest.approx(2.0)
     assert best_loss.std == pytest.approx(1.0)
@@ -186,6 +212,12 @@ def test_multiseed_runs_fixed_seeds_selects_median_and_writes_aggregates(
     assert payload["seeds"] == [17, 42, 73]
     assert payload["reference_seed"] == 73
     assert payload["reference_local_run_id"] == "run-73"
+    assert payload["reference_forecast_artifact"] == {
+        "artifact_id": "forecast-reference",
+        "artifact_fingerprint": "forecast-fingerprint",
+        "sample_count": 2,
+        "split": "validation",
+    }
     assert result.artifact.manifest.is_file()
 
 
