@@ -1,0 +1,10 @@
+{
+  "dataset_id": "radklim-yw-2023-09-dortmund-128x128-v1",
+  "pipeline_version": "0.6.6",
+  "schema_version": "1",
+  "source_checksums": {
+    "YW2017.002_202309.tar": "d63f253ae6c8a33ff454c13ad01c16b57ba95549f9bf6934adfd37b7ba102c2d"
+  },
+  "source_product": "RADKLIM-YW",
+  "source_version": "2017.002"
+}

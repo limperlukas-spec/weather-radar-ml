@@ -1,0 +1,22 @@
+{
+  "dataset_id": "radklim-yw-2023-09-dortmund-128x128-v1",
+  "preparation": {
+    "first_timestamp": "2023-09-01T00:00:00+00:00",
+    "frames": 8583,
+    "last_timestamp": "2023-09-30T23:55:00+00:00",
+    "missing_frame_slots": 57,
+    "rejected_incomplete_frames": 57
+  },
+  "prepared_sha256": "ac75e143649e515c178c8a8f2a101e5121f89db8b4263917821f542ea3690478",
+  "reference_month": "2023-09",
+  "roi": {
+    "approximate_centre_lat": 51.5136,
+    "approximate_centre_lon": 7.4653,
+    "grid_resolution_m": 1000,
+    "height": 128,
+    "name": "dortmund-centred-128km",
+    "width": 128,
+    "x": 196,
+    "y": 549
+  }
+}

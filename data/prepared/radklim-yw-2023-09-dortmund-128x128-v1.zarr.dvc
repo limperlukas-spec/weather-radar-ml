@@ -1,0 +1,6 @@
+outs:
+- md5: ef5ca4dcd935da15f9b9f9e52c5d8355.dir
+  size: 21857619
+  nfiles: 7272
+  hash: md5
+  path: radklim-yw-2023-09-dortmund-128x128-v1.zarr
