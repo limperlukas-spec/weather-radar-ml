@@ -27,7 +27,7 @@ class ForecastTrainer:
         *,
         model: nn.Module,
         loss: ForecastLoss,
-        optimizer: Optimizer,
+        optimizer: Optimizer | None,
         metric_factory: MetricFactory,
         device: str | torch.device = "cpu",
     ) -> None:
@@ -80,7 +80,8 @@ class ForecastTrainer:
         *,
         training: bool,
     ) -> EpochResult:
-        self.model.train(training)
+        optimizing = training and self.optimizer is not None
+        self.model.train(optimizing)
         metrics = self.metric_factory()
         if metrics.spec != self.forecast_model.spec:
             raise ValueError("Metric factory returned a mismatching ModelSpec.")
@@ -91,7 +92,7 @@ class ForecastTrainer:
         batch_count = 0
         sample_count = 0
         context: AbstractContextManager[object]
-        context = nullcontext() if training else torch.no_grad()
+        context = nullcontext() if optimizing else torch.no_grad()
 
         with context:
             for raw_batch in batches:
@@ -103,13 +104,15 @@ class ForecastTrainer:
                     batch.static,
                 )
 
-                if training:
+                if optimizing:
+                    assert self.optimizer is not None
                     self.optimizer.zero_grad(set_to_none=True)
                 prediction = self.forecast_model(batch.dynamic, batch.static)
                 loss_value = self.loss(prediction, batch.target)
                 if loss_value.ndim != 0:
                     raise ValueError("Forecast loss must return a scalar tensor.")
-                if training:
+                if optimizing:
+                    assert self.optimizer is not None
                     torch.autograd.backward(loss_value)
                     self.optimizer.step()
 

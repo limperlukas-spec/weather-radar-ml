@@ -66,6 +66,8 @@ class TrainingSettings:
     batch_size: int
     seed: int
     deterministic_algorithms: bool = True
+    device: str = "cpu"
+    num_workers: int = 0
 
     def __post_init__(self) -> None:
         if self.epochs <= 0:
@@ -74,6 +76,12 @@ class TrainingSettings:
             raise ValueError("batch_size must be greater than zero.")
         if not 0 <= self.seed <= 2**32 - 1:
             raise ValueError("seed must be between 0 and 2**32 - 1.")
+        device = self.device.strip()
+        if not device:
+            raise ValueError("device must not be empty.")
+        object.__setattr__(self, "device", device)
+        if self.num_workers < 0:
+            raise ValueError("num_workers must not be negative.")
 
 
 @dataclass(frozen=True, slots=True)
