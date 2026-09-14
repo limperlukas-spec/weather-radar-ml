@@ -46,7 +46,10 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--tracking-uri", default="./mlruns")
+    parser.add_argument(
+        "--tracking-uri",
+        default="sqlite:///mlruns/mlflow.db",
+    )
     parser.add_argument("--experiment-name", default="weather-radar-ml-0.6-reference")
     args = parser.parse_args()
     if args.num_workers < 0:
