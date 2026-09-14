@@ -2,7 +2,7 @@
 
 A reproducible research framework for benchmarking radar-based weather forecasting strategies under consistent data and evaluation conditions.
 
-> **Status:** Data Foundation 0.3 — native RADKLIM-YW ingestion.
+> **Status:** Training & Experiment Foundation 0.5.
 
 ## Why this project exists
 
@@ -28,16 +28,22 @@ uv sync --all-groups
 uv run weather-radar-ml
 ```
 
-The foundation smoke run should print a composed configuration similar to:
+The default command executes a bounded synthetic persistence-baseline run and
+publishes an immutable local run artifact. Its output is similar to:
 
 ```text
-data=synthetic, model=persistence, seed=42, tracking=weather-radar-ml
+run_id=<run-id> artifact=<runs-root>/<run-id>
 ```
 
-Hydra overrides already work at the boundary:
+The artifact contains the resolved experiment configuration, epoch history, and a
+manifest with checksums, runtime metadata, and final metrics. Persistence has no
+trainable parameters, so the default run intentionally contains no checkpoint.
+
+Hydra remains restricted to the application boundary. Runtime settings can be
+overridden explicitly, for example:
 
 ```bash
-uv run weather-radar-ml training.seed=7
+uv run weather-radar-ml training.seed=7 output.runs_root=./runs
 ```
 
 ## Quality checks
@@ -68,7 +74,20 @@ weather-radar-ml/
 
 ## Current scope
 
-Data Foundation 0.3 adds the first real DWD RADKLIM-YW ingestion path on top of the canonical data model. Evaluation metrics and learned forecast models remain intentionally out of scope.
+Data Foundation 0.4 provides reproducible ML dataset artifacts, a SQLite-backed
+sample catalog, lazy Zarr loading, framework-neutral sample semantics, transforms,
+and a PyTorch adapter.
+
+Training & Experiment Foundation 0.5 adds the model contract, persistence baseline,
+continuous forecast metrics, trainer core, deterministic execution, checkpoint and
+resume support, immutable run artifacts, optional MLflow projection, and an
+executable Hydra/CLI pipeline. The default persistence run evaluates the complete
+train and validation splits without pretending that a parameter-free baseline is
+trainable.
+
+More sophisticated learned forecast models, model-specific architecture research,
+hyperparameter search, distributed training, and browser visualization remain
+outside this milestone.
 
 ## Documentation
 
@@ -77,13 +96,39 @@ Data Foundation 0.3 adds the first real DWD RADKLIM-YW ingestion path on top of 
 - [`docs/development.md`](docs/development.md)
 - [`docs/adr/`](docs/adr/)
 
+## Experiment lifecycle
+
+A configured run follows one explicit path:
+
+```text
+Hydra
+  -> typed RunConfig
+  -> dataset + reproducible DataLoader
+  -> ModelSpec + model
+  -> loss + optional optimizer
+  -> ForecastTrainer
+  -> TrainingHistory
+  -> optional checkpoint
+  -> immutable local run artifact
+  -> optional MLflow projection
+```
+
+The local run artifact is the canonical experiment record. MLflow is a secondary
+comparison/index/UI projection and must not become the only copy of experiment
+state. If tracking fails after local publication, the canonical artifact remains
+intact.
+
+Run reproducibility includes the resolved experiment fingerprint, dataset identity,
+seed and deterministic-algorithm settings, software/platform metadata, and, where
+applicable, model/optimizer state plus Python, NumPy, and PyTorch RNG state.
+
 ## License
 
 Apache License 2.0. See [`LICENSE`](LICENSE).
 
 ## Data lifecycle
 
-Data Foundation 0.2 uses an immutable `Raw -> Canonical -> Prepared -> ML Dataset` lifecycle. Canonical radar data is represented with typed domain objects and xarray; prepared training data uses Zarr. Dataset manifests plus DVC provide semantic and artifact-level reproducibility. See `docs/architecture.md` and ADRs 0004-0006.
+The project uses an immutable `Raw -> Canonical -> Prepared -> ML Dataset` lifecycle. Canonical radar data is represented with typed domain objects and xarray; prepared training data uses Zarr. Dataset manifests plus DVC provide semantic and artifact-level reproducibility. See `docs/architecture.md` and ADRs 0004-0006.
 
 
 ## Real RADKLIM-YW sample
