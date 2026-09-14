@@ -20,6 +20,7 @@ class MlflowTrackingSettings:
     tracking_uri: str = "http://127.0.0.1:5000"
     experiment_name: str = "weather-radar-ml"
     artifact_path: str = "run-artifact"
+    parent_run_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -33,6 +34,12 @@ class MlflowTrackingSettings:
         object.__setattr__(
             self, "artifact_path", _require_string(self.artifact_path, "artifact_path")
         )
+        if self.parent_run_id is not None:
+            object.__setattr__(
+                self,
+                "parent_run_id",
+                _require_string(self.parent_run_id, "parent_run_id"),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +47,14 @@ class MlflowTrackingResult:
     """Identity linking one canonical local run to its MLflow representation."""
 
     local_run_id: str
+    experiment_id: str
+    mlflow_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MlflowParentRunResult:
+    """Identity of one MLflow parent run grouping a multi-seed experiment."""
+
     experiment_id: str
     mlflow_run_id: str
 
@@ -149,10 +164,13 @@ def track_run_artifact(
         if experiment is None
         else experiment.experiment_id
     )
+    tags = _run_tags(run_payload, fingerprint, manifest)
+    if tracking_settings.parent_run_id is not None:
+        tags["mlflow.parentRunId"] = tracking_settings.parent_run_id
     mlflow_run = tracking_client.create_run(
         experiment_id,
         run_name=local_run_id,
-        tags=_run_tags(run_payload, fingerprint, manifest),
+        tags=tags,
     )
     mlflow_run_id = mlflow_run.info.run_id
 
@@ -177,6 +195,84 @@ def track_run_artifact(
         experiment_id=experiment_id,
         mlflow_run_id=mlflow_run_id,
     )
+
+
+def start_mlflow_parent_run(
+    *,
+    run_name: str,
+    seeds: tuple[int, ...],
+    settings: MlflowTrackingSettings | None = None,
+    client: MlflowClientProtocol | None = None,
+) -> MlflowParentRunResult:
+    """Create a running MLflow parent for one multi-seed experiment."""
+    if not seeds:
+        raise ValueError("seeds must not be empty.")
+    tracking_settings = settings or MlflowTrackingSettings()
+    tracking_client = (
+        client if client is not None else create_mlflow_client(tracking_settings)
+    )
+    experiment = tracking_client.get_experiment_by_name(
+        tracking_settings.experiment_name
+    )
+    experiment_id = (
+        tracking_client.create_experiment(tracking_settings.experiment_name)
+        if experiment is None
+        else experiment.experiment_id
+    )
+    parent = tracking_client.create_run(
+        experiment_id,
+        run_name=_require_string(run_name, "run_name"),
+        tags={"weather_radar_ml.run_type": "multi_seed_parent"},
+    )
+    parent_run_id = parent.info.run_id
+    try:
+        tracking_client.log_param(
+            parent_run_id,
+            "multi_seed.seeds",
+            json.dumps(list(seeds), separators=(",", ":")),
+        )
+        tracking_client.log_param(parent_run_id, "multi_seed.seed_count", len(seeds))
+    except Exception:
+        with suppress(Exception):
+            tracking_client.set_terminated(parent_run_id, status="FAILED")
+        raise
+    return MlflowParentRunResult(
+        experiment_id=experiment_id,
+        mlflow_run_id=parent_run_id,
+    )
+
+
+def finish_mlflow_parent_run(
+    parent_run_id: str,
+    *,
+    status: str,
+    settings: MlflowTrackingSettings | None = None,
+    summary_path: str | Path | None = None,
+    metrics: Mapping[str, float] | None = None,
+    client: MlflowClientProtocol | None = None,
+) -> None:
+    """Publish parent-level aggregates and terminate a multi-seed MLflow run."""
+    normalized_status = status.strip().upper()
+    if normalized_status not in {"FINISHED", "FAILED"}:
+        raise ValueError("status must be either 'FINISHED' or 'FAILED'.")
+    tracking_settings = settings or MlflowTrackingSettings()
+    tracking_client = (
+        client if client is not None else create_mlflow_client(tracking_settings)
+    )
+    run_id = _require_string(parent_run_id, "parent_run_id")
+    if metrics is not None:
+        for key, value in sorted(metrics.items()):
+            tracking_client.log_metric(run_id, key, _require_float(value, key))
+    if summary_path is not None:
+        path = Path(summary_path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        tracking_client.log_artifact(
+            run_id,
+            str(path),
+            artifact_path=tracking_settings.artifact_path,
+        )
+    tracking_client.set_terminated(run_id, status=normalized_status)
 
 
 def _run_tags(

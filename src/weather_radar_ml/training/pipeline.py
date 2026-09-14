@@ -6,9 +6,10 @@ import hashlib
 import json
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import torch
 from torch import nn
@@ -27,7 +28,12 @@ from weather_radar_ml.data.ml.dataset import LazyRadarDataset
 from weather_radar_ml.data.ml.domain import SampleSelection
 from weather_radar_ml.data.ml.torch_adapter import TorchRadarDataset, TorchSample
 from weather_radar_ml.evaluation.continuous import ContinuousForecastMetrics
+from weather_radar_ml.evaluation.research import (
+    ResearchEvaluationReport,
+    ResearchForecastEvaluator,
+)
 from weather_radar_ml.models.baseline import PersistenceForecast
+from weather_radar_ml.models.contracts import ForecastModel
 from weather_radar_ml.models.domain import ModelSpec
 from weather_radar_ml.models.unet import UNetForecast
 from weather_radar_ml.tracking.mlflow import (
@@ -41,8 +47,11 @@ from weather_radar_ml.training.artifact import (
     write_run_artifact,
 )
 from weather_radar_ml.training.batching import make_forecast_dataloader
-from weather_radar_ml.training.checkpoint import save_training_checkpoint
-from weather_radar_ml.training.domain import TrainingHistory
+from weather_radar_ml.training.checkpoint import (
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
+from weather_radar_ml.training.domain import ForecastBatch, TrainingHistory
 from weather_radar_ml.training.engine import ForecastTrainer
 from weather_radar_ml.training.losses import MeanSquaredForecastLoss
 from weather_radar_ml.training.reproducibility import configure_reproducibility
@@ -59,6 +68,7 @@ class PipelineResult:
 
     artifact: RunArtifactResult
     history: TrainingHistory
+    validation_research: ResearchEvaluationReport | None = None
     tracking: MlflowTrackingResult | None = None
 
 
@@ -142,7 +152,11 @@ class _SyntheticForecastDataset(Dataset[TorchSample]):
         return item
 
 
-def run_experiment(config: RunConfig) -> PipelineResult:
+def run_experiment(
+    config: RunConfig,
+    *,
+    tracking_parent_run_id: str | None = None,
+) -> PipelineResult:
     """Execute one configured experiment and publish its canonical run artifact."""
     data = _build_data_bundle(config)
     try:
@@ -228,6 +242,23 @@ def run_experiment(config: RunConfig) -> PipelineResult:
                     ),
                 )
 
+            validation_research: ResearchEvaluationReport | None = None
+            if config.model.name == "unet":
+                if optimizer is None:
+                    raise RuntimeError("The learned U-Net requires an optimizer.")
+                load_training_checkpoint(
+                    best_checkpoint,
+                    model=model,
+                    optimizer=optimizer,
+                    restore_rng_state=False,
+                )
+                validation_research = _evaluate_research(
+                    config,
+                    spec=data.spec,
+                    model=model,
+                    batches=validation_loader,
+                )
+
             artifact = write_run_artifact(
                 config.output.runs_root,
                 config=experiment,
@@ -244,11 +275,46 @@ def run_experiment(config: RunConfig) -> PipelineResult:
                     tracking_uri=config.tracking.uri,
                     experiment_name=config.tracking.experiment_name,
                     artifact_path=config.tracking.artifact_path,
+                    parent_run_id=tracking_parent_run_id,
                 ),
             )
-        return PipelineResult(artifact=artifact, history=history, tracking=tracking)
+        return PipelineResult(
+            artifact=artifact,
+            history=history,
+            validation_research=validation_research,
+            tracking=tracking,
+        )
     finally:
         data.close()
+
+
+def _evaluate_research(
+    config: RunConfig,
+    *,
+    spec: ModelSpec,
+    model: nn.Module,
+    batches: Iterable[ForecastBatch],
+) -> ResearchEvaluationReport:
+    forecast_model = cast(ForecastModel, model)
+    evaluator = ResearchForecastEvaluator(
+        spec,
+        persistence_input_features=_infer_persistence_mapping(config.data),
+    )
+    device = torch.device(config.training.device)
+    model.eval()
+    with torch.no_grad():
+        for raw_batch in batches:
+            batch = raw_batch.to(device)
+            prediction = forecast_model(
+                log1p_precipitation(batch.dynamic),
+                batch.static,
+            )
+            evaluator.update(
+                dynamic_inputs=batch.dynamic,
+                learned_prediction_log1p=prediction,
+                target=batch.target,
+            )
+    return evaluator.compute()
 
 
 def _experiment_config(config: RunConfig, data: _DataBundle) -> ExperimentConfig:
