@@ -1,0 +1,44 @@
+name: radklim-yw-2023-09-dortmund-128x128-60m-30m-v1
+
+sources:
+  - source_id: radklim
+    artifact_id: radklim-yw-2023-09-dortmund-128x128-v1
+    role: primary
+    path: data/prepared/radklim-yw-2023-09-dortmund-128x128-v1.zarr
+
+features:
+  dynamic_inputs:
+    - name: precipitation
+      source_id: radklim
+      variable: precipitation_rate
+      kind: dynamic
+  static_inputs: []
+  targets:
+    - name: precipitation_target
+      source_id: radklim
+      variable: precipitation_rate
+      kind: dynamic
+
+temporal:
+  step_minutes: 5
+  history_minutes: 60
+  forecast_minutes: 30
+
+# The prepared source is already cropped to the fixed Dortmund-centred 128 km ROI.
+spatial:
+  mode: full_frame
+
+# Chronological blocks with full-day guard gaps between train/validation/test.
+splits:
+  intervals:
+    - name: train
+      start: 2023-09-01T00:00:00Z
+      end: 2023-09-21T00:00:00Z
+    - name: validation
+      start: 2023-09-22T00:00:00Z
+      end: 2023-09-26T00:00:00Z
+    - name: test
+      start: 2023-09-27T00:00:00Z
+      end: 2023-10-01T00:00:00Z
+
+sample_schema_version: 1

@@ -52,3 +52,20 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_directory(path: Path) -> str:
+    """Hash a directory deterministically from relative paths and file contents."""
+    if not path.is_dir():
+        raise NotADirectoryError(path)
+    digest = hashlib.sha256()
+    files = sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+    if not files:
+        raise ValueError(f"Directory contains no files: {path}")
+    for item in files:
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with item.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()

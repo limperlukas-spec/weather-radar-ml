@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
 from pathlib import Path
 from statistics import mean, stdev
@@ -33,12 +33,13 @@ from weather_radar_ml.tracking.mlflow import (
 from weather_radar_ml.training.forecast_artifact import ForecastArtifactResult
 from weather_radar_ml.training.pipeline import (
     PipelineResult,
+    evaluate_reference_checkpoint,
     run_experiment,
     write_reference_forecast_artifact,
 )
 
 OFFICIAL_MULTI_SEEDS = (17, 42, 73)
-MULTI_SEED_ARTIFACT_FORMAT_VERSION = 2
+MULTI_SEED_ARTIFACT_FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,7 @@ class MultiSeedResult:
     forecast_artifact: ForecastArtifactResult
     aggregates: Mapping[str, AggregateStatistic]
     tracking_parent: MlflowParentRunResult | None = None
+    test_research: Mapping[int, ResearchEvaluationReport] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if len(self.runs) != 3:
@@ -102,10 +104,17 @@ class MultiSeedResult:
         seeds = tuple(run.seed for run in self.runs)
         if self.reference_seed not in seeds:
             raise ValueError("reference_seed must identify one child run.")
+        if set(self.test_research) - set(seeds):
+            raise ValueError("test_research may only contain completed child seeds.")
         object.__setattr__(
             self,
             "aggregates",
             MappingProxyType(dict(sorted(self.aggregates.items()))),
+        )
+        object.__setattr__(
+            self,
+            "test_research",
+            MappingProxyType(dict(sorted(self.test_research.items()))),
         )
 
 
@@ -113,9 +122,11 @@ def run_multiseed_experiment(
     config: RunConfig,
     *,
     seeds: tuple[int, int, int] = OFFICIAL_MULTI_SEEDS,
+    benchmark_split: str = "validation",
 ) -> MultiSeedResult:
-    """Run exactly three fixed-seed learned experiments and aggregate the results."""
+    """Run three fixed seeds and optionally finalize on the held-out test split."""
     normalized_seeds = _validate_seeds(seeds)
+    normalized_benchmark_split = _benchmark_split(benchmark_split)
     if config.model.name != "unet":
         raise ValueError("Multi-seed 0.6 benchmarking currently requires model='unet'.")
 
@@ -148,16 +159,43 @@ def run_multiseed_experiment(
             completed.append(SeedRun(seed=seed, result=result))
 
         runs = tuple(completed)
+
+        # This selection is intentionally completed before any held-out test target
+        # is evaluated. The test split therefore cannot influence model or seed choice.
         reference_seed = _reference_seed(runs)
-        aggregates = _aggregate_runs(runs)
+
+        test_research: dict[int, ResearchEvaluationReport] = {}
+        if normalized_benchmark_split == "test":
+            for run in runs:
+                child_config = replace(
+                    config,
+                    training=replace(config.training, seed=run.seed),
+                )
+                test_research[run.seed] = evaluate_reference_checkpoint(
+                    child_config,
+                    run.result,
+                    split="test",
+                )
+
+        aggregates = _aggregate_runs(runs, test_research=test_research)
         reference = next(run for run in runs if run.seed == reference_seed)
         reference_config = replace(
             config,
             training=replace(config.training, seed=reference_seed),
         )
+        reference_research = (
+            reference.result.validation_research
+            if normalized_benchmark_split == "validation"
+            else test_research[reference_seed]
+        )
+        if reference_research is None:
+            raise RuntimeError("Reference run has no research evaluation report.")
+
         forecast_artifact = write_reference_forecast_artifact(
             reference_config,
             reference.result,
+            split=normalized_benchmark_split,
+            research=reference_research,
         )
         artifact = _write_multiseed_artifact(
             config.output.runs_root,
@@ -166,6 +204,8 @@ def run_multiseed_experiment(
             reference_seed=reference_seed,
             aggregates=aggregates,
             forecast_artifact=forecast_artifact,
+            benchmark_split=normalized_benchmark_split,
+            test_research=test_research,
         )
 
         if parent is not None:
@@ -184,6 +224,7 @@ def run_multiseed_experiment(
             forecast_artifact=forecast_artifact,
             aggregates=aggregates,
             tracking_parent=parent,
+            test_research=test_research,
         )
     except Exception:
         if parent is not None:
@@ -194,6 +235,13 @@ def run_multiseed_experiment(
                     settings=tracking_settings,
                 )
         raise
+
+
+def _benchmark_split(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"validation", "test"}:
+        raise ValueError("benchmark_split must be 'validation' or 'test'.")
+    return normalized
 
 
 def _validate_seeds(seeds: tuple[int, ...]) -> tuple[int, int, int]:
@@ -223,22 +271,41 @@ def _reference_seed(runs: tuple[SeedRun, ...]) -> int:
     return ordered[1].seed
 
 
-def _aggregate_runs(runs: tuple[SeedRun, ...]) -> dict[str, AggregateStatistic]:
+def _aggregate_runs(
+    runs: tuple[SeedRun, ...],
+    *,
+    test_research: Mapping[int, ResearchEvaluationReport] | None = None,
+) -> dict[str, AggregateStatistic]:
     values: dict[str, list[float | None]] = {
         "best_validation_loss": [
             run.result.history.best_validation_loss for run in runs
         ]
     }
-    flattened = [_flatten_research(_require_research(run)) for run in runs]
+    validation = [_flatten_research(_require_research(run)) for run in runs]
+    _add_research_aggregates(values, "validation_research", validation)
+
+    if test_research:
+        expected = {run.seed for run in runs}
+        if set(test_research) != expected:
+            raise ValueError(
+                "Test research must contain exactly one report per seed run."
+            )
+        test = [_flatten_research(test_research[run.seed]) for run in runs]
+        _add_research_aggregates(values, "test_research", test)
+
+    return {key: _aggregate(items) for key, items in values.items()}
+
+
+def _add_research_aggregates(
+    values: dict[str, list[float | None]],
+    prefix: str,
+    flattened: list[dict[str, float | None]],
+) -> None:
     key_sets = [set(payload) for payload in flattened]
     if any(keys != key_sets[0] for keys in key_sets[1:]):
         raise ValueError("Research metric structure differs between seed runs.")
-    keys = sorted(key_sets[0])
-    for key in keys:
-        values[f"validation_research.{key}"] = [
-            payload.get(key) for payload in flattened
-        ]
-    return {key: _aggregate(items) for key, items in values.items()}
+    for key in sorted(key_sets[0]):
+        values[f"{prefix}.{key}"] = [payload.get(key) for payload in flattened]
 
 
 def _require_research(run: SeedRun) -> ResearchEvaluationReport:
@@ -322,6 +389,8 @@ def _write_multiseed_artifact(
     reference_seed: int,
     aggregates: Mapping[str, AggregateStatistic],
     forecast_artifact: ForecastArtifactResult,
+    benchmark_split: str,
+    test_research: Mapping[int, ResearchEvaluationReport],
 ) -> MultiSeedArtifact:
     root = Path(runs_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -339,6 +408,8 @@ def _write_multiseed_artifact(
                 reference_seed=reference_seed,
                 aggregates=aggregates,
                 forecast_artifact=forecast_artifact,
+                benchmark_split=benchmark_split,
+                test_research=test_research,
             ),
         )
         manifest_path = staging / "manifest.json"
@@ -370,12 +441,18 @@ def _summary_payload(
     reference_seed: int,
     aggregates: Mapping[str, AggregateStatistic],
     forecast_artifact: ForecastArtifactResult,
+    benchmark_split: str,
+    test_research: Mapping[int, ResearchEvaluationReport],
 ) -> dict[str, object]:
     reference = next(run for run in runs if run.seed == reference_seed)
     return {
         "format_version": MULTI_SEED_ARTIFACT_FORMAT_VERSION,
         "group_id": group_id,
         "seeds": list(seeds),
+        "selection_policy": (
+            "median best validation loss; test never used for selection"
+        ),
+        "benchmark_split": benchmark_split,
         "reference_seed": reference_seed,
         "reference_local_run_id": reference.result.artifact.root.name,
         "reference_forecast_artifact": {
@@ -391,6 +468,11 @@ def _summary_payload(
                 "best_epoch": run.result.history.best_epoch,
                 "best_validation_loss": run.result.history.best_validation_loss,
                 "validation_research": asdict(_require_research(run)),
+                **(
+                    {"test_research": asdict(test_research[run.seed])}
+                    if run.seed in test_research
+                    else {}
+                ),
             }
             for run in runs
         ],

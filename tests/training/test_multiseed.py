@@ -168,9 +168,13 @@ def test_multiseed_runs_fixed_seeds_selects_median_and_writes_aggregates(
         config: RunConfig,
         result: PipelineResult,
         *,
+        split: str = "validation",
+        research: ResearchEvaluationReport | None = None,
         qualitative_count: int = 8,
     ) -> ForecastArtifactResult:
         assert qualitative_count == 8
+        assert split == "validation"
+        assert research == result.validation_research
         forecast_seeds.append(config.training.seed)
         root = tmp_path / "forecast-reference"
         return ForecastArtifactResult(
@@ -181,7 +185,7 @@ def test_multiseed_runs_fixed_seeds_selects_median_and_writes_aggregates(
             manifest=root / "manifest.json",
             fingerprint="forecast-fingerprint",
             sample_count=2,
-            split="validation",
+            split=split,
         )
 
     monkeypatch.setattr(multiseed, "run_experiment", fake_run)
@@ -210,6 +214,7 @@ def test_multiseed_runs_fixed_seeds_selects_median_and_writes_aggregates(
 
     payload = json.loads(result.artifact.summary.read_text(encoding="utf-8"))
     assert payload["seeds"] == [17, 42, 73]
+    assert payload["benchmark_split"] == "validation"
     assert payload["reference_seed"] == 73
     assert payload["reference_local_run_id"] == "run-73"
     assert payload["reference_forecast_artifact"] == {
@@ -253,3 +258,112 @@ def test_multiseed_rejects_non_unet_model(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="model='unet'"):
         run_multiseed_experiment(config)
+
+
+def test_test_benchmark_opens_test_only_after_validation_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import weather_radar_ml.training.multiseed as multiseed
+
+    losses = {17: 3.0, 42: 1.0, 73: 2.0}
+    test_maes = {17: 6.0, 42: 9.0, 73: 3.0}
+    events: list[str] = []
+
+    def fake_run(
+        config: RunConfig,
+        *,
+        tracking_parent_run_id: str | None = None,
+    ) -> PipelineResult:
+        assert tracking_parent_run_id is None
+        seed = config.training.seed
+        events.append(f"run:{seed}")
+        loss = losses[seed]
+        history = TrainingHistory(
+            train=(_epoch(loss),),
+            validation=(_epoch(loss),),
+        )
+        root = tmp_path / f"run-{seed}"
+        return PipelineResult(
+            artifact=RunArtifactResult(
+                root=root,
+                manifest=root / "manifest.json",
+                config=root / "config.json",
+                history=root / "history.json",
+                checkpoints=(),
+            ),
+            history=history,
+            validation_research=_research(float(seed)),
+        )
+
+    def fake_test_evaluation(
+        config: RunConfig,
+        result: PipelineResult,
+        *,
+        split: str,
+    ) -> ResearchEvaluationReport:
+        assert split == "test"
+        seed = config.training.seed
+        events.append(f"test:{seed}")
+        assert result.history.best_validation_loss == losses[seed]
+        return _research(test_maes[seed])
+
+    def fake_forecast(
+        config: RunConfig,
+        result: PipelineResult,
+        *,
+        split: str = "validation",
+        research: ResearchEvaluationReport | None = None,
+        qualitative_count: int = 8,
+    ) -> ForecastArtifactResult:
+        assert qualitative_count == 8
+        assert split == "test"
+        assert config.training.seed == 73
+        assert result.history.best_validation_loss == 2.0
+        assert research == _research(3.0)
+        events.append("forecast:73")
+        root = tmp_path / "forecast-test-reference"
+        return ForecastArtifactResult(
+            root=root,
+            predictions=root / "predictions.zarr",
+            metadata=root / "metadata.json",
+            qualitative_samples=root / "qualitative-samples.json",
+            manifest=root / "manifest.json",
+            fingerprint="test-forecast-fingerprint",
+            sample_count=2,
+            split=split,
+        )
+
+    monkeypatch.setattr(multiseed, "run_experiment", fake_run)
+    monkeypatch.setattr(
+        multiseed,
+        "evaluate_reference_checkpoint",
+        fake_test_evaluation,
+    )
+    monkeypatch.setattr(multiseed, "write_reference_forecast_artifact", fake_forecast)
+
+    result = run_multiseed_experiment(
+        _config(tmp_path / "runs"),
+        benchmark_split="test",
+    )
+
+    assert events == [
+        "run:17",
+        "run:42",
+        "run:73",
+        "test:17",
+        "test:42",
+        "test:73",
+        "forecast:73",
+    ]
+    assert result.reference_seed == 73
+    assert set(result.test_research) == {17, 42, 73}
+    aggregate = result.aggregates["test_research.all.learned.overall.mae"]
+    assert aggregate.mean == pytest.approx(6.0)
+    assert aggregate.std == pytest.approx(3.0)
+
+    payload = json.loads(result.artifact.summary.read_text(encoding="utf-8"))
+    assert payload["benchmark_split"] == "test"
+    assert payload["reference_seed"] == 73
+    assert payload["reference_forecast_artifact"]["split"] == "test"
+    assert all("test_research" in run for run in payload["runs"])

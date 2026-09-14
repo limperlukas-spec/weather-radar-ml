@@ -293,28 +293,98 @@ def run_experiment(
         data.close()
 
 
+def evaluate_reference_checkpoint(
+    config: RunConfig,
+    result: PipelineResult,
+    *,
+    split: str,
+) -> ResearchEvaluationReport:
+    """Evaluate one selected best checkpoint on validation or held-out test data."""
+    normalized_split = _evaluation_split(split)
+    if config.model.name != "unet":
+        raise ValueError(
+            "Reference research evaluation currently requires model='unet'."
+        )
+    if result.validation_research is None:
+        raise ValueError("Reference evaluation requires validation research results.")
+
+    best_checkpoint = _checkpoint_by_role(result.artifact, "best")
+    data = _build_data_bundle(config)
+    extra_closer: Callable[[], None] | None = None
+    try:
+        dataset, extra_closer = _evaluation_dataset(
+            config,
+            data=data,
+            split=normalized_split,
+        )
+        model = _build_model(config, data.spec)
+        optimizer = _build_optimizer(config, model)
+        if optimizer is None:
+            raise RuntimeError("The learned U-Net requires an optimizer.")
+        load_training_checkpoint(
+            best_checkpoint,
+            model=model,
+            optimizer=optimizer,
+            restore_rng_state=False,
+        )
+        loader = make_forecast_dataloader(
+            dataset,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            seed=config.training.seed,
+            num_workers=config.training.num_workers,
+        )
+        return _evaluate_research(
+            config,
+            spec=data.spec,
+            model=model,
+            batches=loader,
+        )
+    finally:
+        if extra_closer is not None:
+            extra_closer()
+        data.close()
+
+
 def write_reference_forecast_artifact(
     config: RunConfig,
     result: PipelineResult,
     *,
+    split: str = "validation",
+    research: ResearchEvaluationReport | None = None,
     qualitative_count: int = 8,
 ) -> ForecastArtifactResult:
-    """Persist validation forecasts from one learned run's selected best checkpoint.
-
-    Version 0.6.5 materializes the validation split so the artifact contract can be
-    tested without consuming the final test benchmark. Version 0.6.6 can reuse the
-    same writer for the held-out test split once that runtime path is introduced.
-    """
+    """Persist physical forecasts from one learned run's selected best checkpoint."""
+    normalized_split = _evaluation_split(split)
     if config.model.name != "unet":
         raise ValueError("Reference forecast artifacts currently require model='unet'.")
     if result.validation_research is None:
         raise ValueError(
-            "Reference forecast artifacts require research evaluation results."
+            "Reference forecast artifacts require validation research results."
         )
+
+    evaluation_research = research
+    if evaluation_research is None:
+        if normalized_split == "validation":
+            evaluation_research = result.validation_research
+        else:
+            evaluation_research = evaluate_reference_checkpoint(
+                config,
+                result,
+                split=normalized_split,
+            )
+    if evaluation_research is None:
+        raise RuntimeError("Reference evaluation report is unexpectedly unavailable.")
 
     best_checkpoint = _checkpoint_by_role(result.artifact, "best")
     data = _build_data_bundle(config)
+    extra_closer: Callable[[], None] | None = None
     try:
+        dataset, extra_closer = _evaluation_dataset(
+            config,
+            data=data,
+            split=normalized_split,
+        )
         model = _build_model(config, data.spec)
         optimizer = _build_optimizer(config, model)
         if optimizer is None:
@@ -337,12 +407,12 @@ def write_reference_forecast_artifact(
         persistence.eval()
 
         loader = DataLoader(
-            data.validation,
+            dataset,
             batch_size=config.training.batch_size,
             shuffle=False,
             num_workers=config.training.num_workers,
         )
-        artifact_id = f"forecast-{result.artifact.root.name}-validation"
+        artifact_id = f"forecast-{result.artifact.root.name}-{normalized_split}"
         return write_forecast_artifact(
             config.output.runs_root,
             artifact_id=artifact_id,
@@ -357,15 +427,19 @@ def write_reference_forecast_artifact(
                 loader=loader,
                 device=device,
             ),
-            split="validation",
+            split=normalized_split,
             provenance=_forecast_provenance(
                 config,
                 result,
                 best_checkpoint=best_checkpoint,
+                evaluation_split=normalized_split,
+                evaluation_research=evaluation_research,
             ),
             qualitative_count=qualitative_count,
         )
     finally:
+        if extra_closer is not None:
+            extra_closer()
         data.close()
 
 
@@ -422,6 +496,8 @@ def _forecast_provenance(
     result: PipelineResult,
     *,
     best_checkpoint: Path,
+    evaluation_split: str,
+    evaluation_research: ResearchEvaluationReport,
 ) -> dict[str, object]:
     manifest = _read_json_mapping(result.artifact.manifest)
     persisted_config = _read_json_mapping(result.artifact.config)
@@ -430,8 +506,8 @@ def _forecast_provenance(
     if not isinstance(fingerprint, str) or not fingerprint.strip():
         raise ValueError("Run manifest has no valid config_fingerprint.")
 
-    research = result.validation_research
-    if research is None:
+    validation_research = result.validation_research
+    if validation_research is None:
         raise ValueError("Forecast provenance requires validation research results.")
 
     return {
@@ -455,7 +531,10 @@ def _forecast_provenance(
             "path": best_checkpoint.relative_to(result.artifact.root).as_posix(),
             "sha256": _sha256(best_checkpoint),
         },
-        "validation_research": asdict(research),
+        "selection_policy": "best checkpoint selected by validation loss only",
+        "validation_research": asdict(validation_research),
+        "evaluation_split": evaluation_split,
+        "evaluation_research": asdict(evaluation_research),
     }
 
 
@@ -655,6 +734,51 @@ def _ml_dataset_bundle(config: RunConfig) -> _DataBundle:
         spec=spec,
         closers=(train_dataset.close, validation_dataset.close),
     )
+
+
+def _evaluation_dataset(
+    config: RunConfig,
+    *,
+    data: _DataBundle,
+    split: str,
+) -> tuple[Dataset[TorchSample], Callable[[], None] | None]:
+    if split == "validation":
+        return data.validation, None
+    if split != "test":
+        raise ValueError(f"Unsupported evaluation split: {split!r}.")
+    if config.data.name != "ml_dataset":
+        raise ValueError("Held-out test evaluation requires data.name='ml_dataset'.")
+    dataset_config = config.data.dataset
+    catalog_path = config.data.catalog_path
+    if dataset_config is None or catalog_path is None:
+        raise ValueError("ml_dataset runtime requires catalog_path and dataset config.")
+    if not catalog_path.is_file():
+        raise FileNotFoundError(catalog_path)
+
+    catalog = SQLiteSampleCatalog(catalog_path)
+    selection = SampleSelection(split="test")
+    records = catalog.query(selection)
+    if not records:
+        raise ValueError("Configured test split contains no samples.")
+    if _catalog_reference(records) != data.reference:
+        raise ValueError(
+            "Test samples must share the training dataset build and feature schema."
+        )
+
+    lazy = LazyRadarDataset(
+        catalog=catalog,
+        config=dataset_config,
+        selection=selection,
+        source_paths=config.data.source_paths,
+    )
+    return TorchRadarDataset(lazy), lazy.close
+
+
+def _evaluation_split(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"validation", "test"}:
+        raise ValueError("Reference evaluation split must be 'validation' or 'test'.")
+    return normalized
 
 
 def _catalog_reference(records: tuple[SampleRecord, ...]) -> DatasetReference:

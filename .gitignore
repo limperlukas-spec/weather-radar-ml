@@ -21,6 +21,7 @@ mlruns/
 outputs/
 multirun/
 artifacts/
+runs/
 
 # IDE / OS
 .DS_Store
@@ -44,3 +45,8 @@ data/prepared/**
 data/reference/**
 !data/reference/**/
 !data/reference/**/*.dvc
+
+# Immutable ML dataset artifacts (version through DVC when retained)
+data/ml/**
+!data/ml/**/
+!data/ml/**/*.dvc
