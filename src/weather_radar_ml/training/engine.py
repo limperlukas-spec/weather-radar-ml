@@ -7,7 +7,7 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import cast
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from weather_radar_ml.evaluation.contracts import ForecastMetricAccumulator
@@ -17,6 +17,8 @@ from weather_radar_ml.training.contracts import ForecastLoss
 from weather_radar_ml.training.domain import EpochResult, ForecastBatch, TrainingHistory
 
 MetricFactory = Callable[[], ForecastMetricAccumulator]
+TensorTransform = Callable[[Tensor], Tensor]
+BestValidationCallback = Callable[[int, EpochResult], None]
 
 
 class ForecastTrainer:
@@ -30,6 +32,9 @@ class ForecastTrainer:
         optimizer: Optimizer | None,
         metric_factory: MetricFactory,
         device: str | torch.device = "cpu",
+        input_transform: TensorTransform | None = None,
+        target_transform: TensorTransform | None = None,
+        metric_prediction_transform: TensorTransform | None = None,
     ) -> None:
         if not isinstance(model, ForecastModel):
             raise TypeError("model must satisfy the ForecastModel protocol.")
@@ -46,6 +51,9 @@ class ForecastTrainer:
         self.optimizer = optimizer
         self.metric_factory = metric_factory
         self.device = torch.device(device)
+        self.input_transform = input_transform or _identity
+        self.target_transform = target_transform or _identity
+        self.metric_prediction_transform = metric_prediction_transform or _identity
         self.model.to(self.device)
 
     def fit(
@@ -54,17 +62,50 @@ class ForecastTrainer:
         validation_batches: Iterable[ForecastBatch],
         *,
         epochs: int,
+        early_stopping_patience: int | None = None,
+        on_best_validation: BestValidationCallback | None = None,
     ) -> TrainingHistory:
-        """Run matching train and validation passes for a fixed epoch count."""
+        """Run matching train/validation passes with optional early stopping."""
         if epochs <= 0:
             raise ValueError("epochs must be greater than zero.")
+        if early_stopping_patience is not None and early_stopping_patience <= 0:
+            raise ValueError("early_stopping_patience must be greater than zero.")
 
         train_results: list[EpochResult] = []
         validation_results: list[EpochResult] = []
-        for _ in range(epochs):
+        best_epoch = 0
+        best_validation_loss = float("inf")
+        epochs_without_improvement = 0
+
+        for epoch in range(1, epochs + 1):
             train_results.append(self.run_train_epoch(train_batches))
-            validation_results.append(self.run_validation_epoch(validation_batches))
-        return TrainingHistory(tuple(train_results), tuple(validation_results))
+            validation = self.run_validation_epoch(validation_batches)
+            validation_results.append(validation)
+
+            if not torch.isfinite(torch.tensor(validation.loss)).item():
+                raise ValueError("Validation loss must be finite.")
+            if validation.loss < best_validation_loss:
+                best_epoch = epoch
+                best_validation_loss = validation.loss
+                epochs_without_improvement = 0
+                if on_best_validation is not None:
+                    on_best_validation(epoch, validation)
+            else:
+                epochs_without_improvement += 1
+
+            if (
+                early_stopping_patience is not None
+                and epochs_without_improvement >= early_stopping_patience
+            ):
+                break
+
+        return TrainingHistory(
+            train=tuple(train_results),
+            validation=tuple(validation_results),
+            best_epoch=best_epoch,
+            best_validation_loss=best_validation_loss,
+            stopped_early=len(train_results) < epochs,
+        )
 
     def run_train_epoch(self, batches: Iterable[ForecastBatch]) -> EpochResult:
         """Run one optimization pass and aggregate dataset-level metrics."""
@@ -107,8 +148,10 @@ class ForecastTrainer:
                 if optimizing:
                     assert self.optimizer is not None
                     self.optimizer.zero_grad(set_to_none=True)
-                prediction = self.forecast_model(batch.dynamic, batch.static)
-                loss_value = self.loss(prediction, batch.target)
+                model_input = self.input_transform(batch.dynamic)
+                loss_target = self.target_transform(batch.target)
+                prediction = self.forecast_model(model_input, batch.static)
+                loss_value = self.loss(prediction, loss_target)
                 if loss_value.ndim != 0:
                     raise ValueError("Forecast loss must return a scalar tensor.")
                 if optimizing:
@@ -116,7 +159,10 @@ class ForecastTrainer:
                     torch.autograd.backward(loss_value)
                     self.optimizer.step()
 
-                metrics.update(prediction.detach(), batch.target.detach())
+                metric_prediction = self.metric_prediction_transform(
+                    prediction.detach()
+                )
+                metrics.update(metric_prediction, batch.target.detach())
                 count = batch.target.numel()
                 weighted_loss += float(loss_value.detach().item()) * count
                 scalar_count += count
@@ -131,3 +177,7 @@ class ForecastTrainer:
             batches=batch_count,
             samples=sample_count,
         )
+
+
+def _identity(values: Tensor) -> Tensor:
+    return values

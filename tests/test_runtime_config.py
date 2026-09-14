@@ -27,6 +27,7 @@ def test_legacy_minimal_mapping_keeps_runnable_defaults() -> None:
     assert config.data.name == "synthetic"
     assert config.training.epochs == 1
     assert config.training.batch_size == 4
+    assert config.training.early_stopping_patience is None
     assert config.training.loss == ComponentConfig("mse")
     assert config.training.optimizer == ComponentConfig("none")
     assert config.output.runs_root == Path("runs")
@@ -57,6 +58,7 @@ def test_full_synthetic_mapping_is_typed() -> None:
                 "device": "cpu",
                 "num_workers": 0,
                 "deterministic_algorithms": True,
+                "early_stopping_patience": 7,
                 "loss": {"name": "mse", "parameters": {}},
                 "optimizer": {"name": "adam", "parameters": {"lr": 0.01}},
             },
@@ -74,6 +76,7 @@ def test_full_synthetic_mapping_is_typed() -> None:
     assert config.data.dynamic_input_features == ("rain", "temperature")
     assert config.data.static_input_features == ("height",)
     assert config.training.optimizer.parameters["lr"] == 0.01
+    assert config.training.early_stopping_patience == 7
     assert config.tracking.enabled is True
     assert config.output.runs_root == Path("custom-runs")
 
@@ -81,3 +84,18 @@ def test_full_synthetic_mapping_is_typed() -> None:
 def test_ml_dataset_data_config_requires_catalog_and_dataset() -> None:
     with pytest.raises(ValueError, match="requires catalog_path and dataset"):
         DataConfig(name="ml_dataset")
+
+
+def test_training_config_rejects_non_positive_early_stopping_patience() -> None:
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        run_config_from_mapping(
+            {
+                "data": {"name": "synthetic"},
+                "model": {"name": "persistence"},
+                "training": {"seed": 42, "early_stopping_patience": 0},
+                "tracking": {
+                    "uri": "./mlruns",
+                    "experiment_name": "tests",
+                },
+            }
+        )

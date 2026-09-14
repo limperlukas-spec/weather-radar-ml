@@ -94,3 +94,36 @@ def test_unet_rejects_too_small_spatial_dimensions() -> None:
 
     with pytest.raises(ValueError, match="at least 4"):
         model(torch.rand((1, 12, 1, 3, 16), dtype=torch.float32))
+
+
+def test_unet_exposes_model_spec_for_common_training_pipeline() -> None:
+    from weather_radar_ml.models.domain import ModelSpec
+
+    spec = ModelSpec(
+        name="unet",
+        dynamic_input_features=("rain",),
+        target_features=("rain",),
+        history_steps=2,
+        forecast_steps=1,
+    )
+    model = UNetForecast(spec, base_channels=4)
+
+    assert model.spec == spec
+    prediction = model(torch.rand((1, 2, 1, 8, 8)), None)
+    assert prediction.shape == (1, 1, 1, 8, 8)
+
+
+def test_unet_rejects_static_model_spec() -> None:
+    from weather_radar_ml.models.domain import ModelSpec
+
+    spec = ModelSpec(
+        name="unet",
+        dynamic_input_features=("rain",),
+        static_input_features=("height",),
+        target_features=("rain",),
+        history_steps=2,
+        forecast_steps=1,
+    )
+
+    with pytest.raises(ValueError, match="does not support static inputs"):
+        UNetForecast(spec, base_channels=4)

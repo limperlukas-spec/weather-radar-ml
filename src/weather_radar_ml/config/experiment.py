@@ -68,6 +68,7 @@ class TrainingSettings:
     deterministic_algorithms: bool = True
     device: str = "cpu"
     num_workers: int = 0
+    early_stopping_patience: int | None = None
 
     def __post_init__(self) -> None:
         if self.epochs <= 0:
@@ -82,6 +83,11 @@ class TrainingSettings:
         object.__setattr__(self, "device", device)
         if self.num_workers < 0:
             raise ValueError("num_workers must not be negative.")
+        if (
+            self.early_stopping_patience is not None
+            and self.early_stopping_patience <= 0
+        ):
+            raise ValueError("early_stopping_patience must be greater than zero.")
 
 
 @dataclass(frozen=True, slots=True)

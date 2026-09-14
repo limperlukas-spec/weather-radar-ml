@@ -29,6 +29,7 @@ from weather_radar_ml.data.ml.torch_adapter import TorchRadarDataset, TorchSampl
 from weather_radar_ml.evaluation.continuous import ContinuousForecastMetrics
 from weather_radar_ml.models.baseline import PersistenceForecast
 from weather_radar_ml.models.domain import ModelSpec
+from weather_radar_ml.models.unet import UNetForecast
 from weather_radar_ml.tracking.mlflow import (
     MlflowTrackingResult,
     MlflowTrackingSettings,
@@ -41,10 +42,15 @@ from weather_radar_ml.training.artifact import (
 )
 from weather_radar_ml.training.batching import make_forecast_dataloader
 from weather_radar_ml.training.checkpoint import save_training_checkpoint
+from weather_radar_ml.training.domain import TrainingHistory
 from weather_radar_ml.training.engine import ForecastTrainer
 from weather_radar_ml.training.losses import MeanSquaredForecastLoss
 from weather_radar_ml.training.reproducibility import configure_reproducibility
 from weather_radar_ml.training.run import create_run_metadata
+from weather_radar_ml.transforms.precipitation import (
+    inverse_log1p_precipitation,
+    log1p_precipitation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +58,7 @@ class PipelineResult:
     """Published local artifact and optional MLflow identity for one run."""
 
     artifact: RunArtifactResult
+    history: TrainingHistory
     tracking: MlflowTrackingResult | None = None
 
 
@@ -144,12 +151,18 @@ def run_experiment(config: RunConfig) -> PipelineResult:
         model = _build_model(config, data.spec)
         loss = _build_loss(config, data.spec)
         optimizer = _build_optimizer(config, model)
+        input_transform, target_transform, metric_prediction_transform = (
+            _training_transforms(config)
+        )
         trainer = ForecastTrainer(
             model=model,
             loss=loss,
             optimizer=optimizer,
             metric_factory=lambda: ContinuousForecastMetrics(data.spec),
             device=config.training.device,
+            input_transform=input_transform,
+            target_transform=target_transform,
+            metric_prediction_transform=metric_prediction_transform,
         )
         train_loader = make_forecast_dataloader(
             data.train,
@@ -165,32 +178,56 @@ def run_experiment(config: RunConfig) -> PipelineResult:
             seed=config.training.seed,
             num_workers=config.training.num_workers,
         )
-        history = trainer.fit(
-            train_loader,
-            validation_loader,
-            epochs=config.training.epochs,
-        )
         metadata = create_run_metadata(
             experiment,
             git_commit=_git_commit(),
         )
 
         with tempfile.TemporaryDirectory(prefix="weather-radar-ml-checkpoint-") as tmp:
-            checkpoints: tuple[CheckpointArtifact, ...] = ()
-            if optimizer is not None:
-                checkpoint_path = Path(tmp) / "final.pt"
+            temporary_root = Path(tmp)
+            best_checkpoint = temporary_root / "best.pt"
+
+            def save_best(epoch: int, _: object) -> None:
+                if optimizer is None:
+                    return
                 save_training_checkpoint(
-                    checkpoint_path,
+                    best_checkpoint,
                     model=model,
                     optimizer=optimizer,
-                    completed_epochs=config.training.epochs,
+                    completed_epochs=epoch,
+                )
+
+            history = trainer.fit(
+                train_loader,
+                validation_loader,
+                epochs=config.training.epochs,
+                early_stopping_patience=config.training.early_stopping_patience,
+                on_best_validation=save_best if optimizer is not None else None,
+            )
+
+            checkpoints: tuple[CheckpointArtifact, ...] = ()
+            if optimizer is not None:
+                last_checkpoint = temporary_root / "last.pt"
+                completed_epochs = len(history.train)
+                save_training_checkpoint(
+                    last_checkpoint,
+                    model=model,
+                    optimizer=optimizer,
+                    completed_epochs=completed_epochs,
                 )
                 checkpoints = (
                     CheckpointArtifact(
-                        checkpoint_path,
-                        completed_epochs=config.training.epochs,
+                        best_checkpoint,
+                        completed_epochs=history.best_epoch,
+                        role="best",
+                    ),
+                    CheckpointArtifact(
+                        last_checkpoint,
+                        completed_epochs=completed_epochs,
+                        role="last",
                     ),
                 )
+
             artifact = write_run_artifact(
                 config.output.runs_root,
                 config=experiment,
@@ -209,7 +246,7 @@ def run_experiment(config: RunConfig) -> PipelineResult:
                     artifact_path=config.tracking.artifact_path,
                 ),
             )
-        return PipelineResult(artifact=artifact, tracking=tracking)
+        return PipelineResult(artifact=artifact, history=history, tracking=tracking)
     finally:
         data.close()
 
@@ -229,6 +266,7 @@ def _experiment_config(config: RunConfig, data: _DataBundle) -> ExperimentConfig
             deterministic_algorithms=config.training.deterministic_algorithms,
             device=config.training.device,
             num_workers=config.training.num_workers,
+            early_stopping_patience=config.training.early_stopping_patience,
         ),
     )
 
@@ -349,19 +387,40 @@ def _catalog_reference(records: tuple[SampleRecord, ...]) -> DatasetReference:
 
 
 def _build_model(config: RunConfig, spec: ModelSpec) -> nn.Module:
-    if config.model.name != "persistence":
-        raise ValueError(f"Unsupported model strategy: {config.model.name!r}.")
     parameters = config.model.parameters
-    unknown = set(parameters) - {"target_input_features"}
-    if unknown:
-        raise ValueError(f"Unsupported persistence parameters: {sorted(unknown)!r}.")
-    raw_mapping = parameters.get("target_input_features")
-    target_inputs = (
-        _string_tuple(raw_mapping, "model.parameters.target_input_features")
-        if raw_mapping is not None
-        else _infer_persistence_mapping(config.data)
-    )
-    return PersistenceForecast(spec, target_input_features=target_inputs)
+    if config.model.name == "persistence":
+        unknown = set(parameters) - {"target_input_features"}
+        if unknown:
+            raise ValueError(
+                f"Unsupported persistence parameters: {sorted(unknown)!r}."
+            )
+        raw_mapping = parameters.get("target_input_features")
+        target_inputs = (
+            _string_tuple(raw_mapping, "model.parameters.target_input_features")
+            if raw_mapping is not None
+            else _infer_persistence_mapping(config.data)
+        )
+        return PersistenceForecast(spec, target_input_features=target_inputs)
+
+    if config.model.name == "unet":
+        if len(spec.dynamic_input_features) != 1 or len(spec.target_features) != 1:
+            raise ValueError(
+                "The 0.6 U-Net reference requires exactly one dynamic input "
+                "and one target precipitation feature."
+            )
+        unknown = set(parameters) - {"base_channels"}
+        if unknown:
+            raise ValueError(f"Unsupported unet parameters: {sorted(unknown)!r}.")
+        return UNetForecast(
+            spec,
+            base_channels=_positive_int_parameter(
+                parameters,
+                "base_channels",
+                32,
+            ),
+        )
+
+    raise ValueError(f"Unsupported model strategy: {config.model.name!r}.")
 
 
 def _infer_persistence_mapping(data: DataConfig) -> tuple[str, ...] | None:
@@ -383,6 +442,22 @@ def _infer_persistence_mapping(data: DataConfig) -> tuple[str, ...] | None:
             )
         result.append(matches[0])
     return tuple(result)
+
+
+def _training_transforms(
+    config: RunConfig,
+) -> tuple[
+    Callable[[torch.Tensor], torch.Tensor] | None,
+    Callable[[torch.Tensor], torch.Tensor] | None,
+    Callable[[torch.Tensor], torch.Tensor] | None,
+]:
+    if config.model.name == "unet":
+        return (
+            log1p_precipitation,
+            log1p_precipitation,
+            inverse_log1p_precipitation,
+        )
+    return None, None, None
 
 
 def _build_loss(config: RunConfig, spec: ModelSpec) -> MeanSquaredForecastLoss:
@@ -427,6 +502,19 @@ def _build_optimizer(config: RunConfig, model: nn.Module) -> Optimizer | None:
             weight_decay=_float_parameter(component.parameters, "weight_decay", 0.0),
         )
     raise ValueError(f"Unsupported optimizer: {component.name!r}.")
+
+
+def _positive_int_parameter(
+    parameters: Mapping[str, object],
+    name: str,
+    default: int,
+) -> int:
+    value = parameters.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Model parameter {name!r} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"Model parameter {name!r} must be greater than zero.")
+    return value
 
 
 def _float_parameter(

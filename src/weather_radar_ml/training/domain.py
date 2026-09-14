@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isclose, isfinite
 
 import torch
 from torch import Tensor
@@ -49,13 +50,38 @@ class EpochResult:
 
 @dataclass(frozen=True, slots=True)
 class TrainingHistory:
-    """Train and validation results in matching epoch order."""
+    """Train/validation history plus deterministic model-selection metadata."""
 
     train: tuple[EpochResult, ...]
     validation: tuple[EpochResult, ...]
+    best_epoch: int = 0
+    best_validation_loss: float = float("inf")
+    stopped_early: bool = False
 
     def __post_init__(self) -> None:
         if not self.train:
             raise ValueError("TrainingHistory requires at least one epoch.")
         if len(self.train) != len(self.validation):
             raise ValueError("Train and validation histories must have equal length.")
+
+        if self.best_epoch == 0:
+            best_index = min(
+                range(len(self.validation)),
+                key=lambda index: self.validation[index].loss,
+            )
+            object.__setattr__(self, "best_epoch", best_index + 1)
+            object.__setattr__(
+                self,
+                "best_validation_loss",
+                self.validation[best_index].loss,
+            )
+
+        if not 1 <= self.best_epoch <= len(self.validation):
+            raise ValueError("best_epoch must refer to a completed epoch.")
+        if not isfinite(self.best_validation_loss):
+            raise ValueError("best_validation_loss must be finite.")
+        selected_loss = self.validation[self.best_epoch - 1].loss
+        if not isclose(selected_loss, self.best_validation_loss):
+            raise ValueError(
+                "best_validation_loss must match the selected validation epoch."
+            )

@@ -106,6 +106,7 @@ class TrainingConfig:
     device: str = "cpu"
     num_workers: int = 0
     deterministic_algorithms: bool = True
+    early_stopping_patience: int | None = None
     loss: ComponentConfig = field(default_factory=lambda: ComponentConfig("mse"))
     optimizer: ComponentConfig = field(default_factory=lambda: ComponentConfig("none"))
 
@@ -118,6 +119,13 @@ class TrainingConfig:
             raise ValueError("training.batch_size must be greater than zero.")
         if self.num_workers < 0:
             raise ValueError("training.num_workers must not be negative.")
+        if (
+            self.early_stopping_patience is not None
+            and self.early_stopping_patience <= 0
+        ):
+            raise ValueError(
+                "training.early_stopping_patience must be greater than zero."
+            )
         object.__setattr__(self, "device", _non_empty(self.device, "training.device"))
 
 
@@ -230,6 +238,10 @@ def run_config_from_mapping(mapping: Mapping[str, Any]) -> RunConfig:
             deterministic_algorithms=bool(
                 training.get("deterministic_algorithms", True)
             ),
+            early_stopping_patience=_optional_int(
+                training.get("early_stopping_patience"),
+                "training.early_stopping_patience",
+            ),
             loss=_component(training.get("loss"), "mse", "training.loss"),
             optimizer=_component(
                 training.get("optimizer"), "none", "training.optimizer"
@@ -282,6 +294,14 @@ def _optional_mapping(value: Any, name: str) -> Mapping[str, Any]:
     if value is None:
         return {}
     return _require_mapping(value, name)
+
+
+def _optional_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer or null.")
+    return int(value)
 
 
 def _optional_path(value: Any) -> Path | None:

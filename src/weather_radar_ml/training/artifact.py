@@ -28,11 +28,17 @@ class CheckpointArtifact:
 
     source: Path
     completed_epochs: int
+    role: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source", Path(self.source))
         if self.completed_epochs <= 0:
             raise ValueError("completed_epochs must be greater than zero.")
+        if self.role is not None:
+            role = self.role.strip()
+            if role in {".", ".."} or not role or Path(role).name != role:
+                raise ValueError("checkpoint role must be a safe path segment.")
+            object.__setattr__(self, "role", role)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +91,9 @@ def write_run_artifact(
             },
             "results": {
                 "completed_epochs": len(history.train),
+                "best_epoch": history.best_epoch,
+                "best_validation_loss": history.best_validation_loss,
+                "stopped_early": history.stopped_early,
                 "final_train": _epoch_payload(history.train[-1]),
                 "final_validation": _epoch_payload(history.validation[-1]),
             },
@@ -116,14 +125,25 @@ def _validate_run(
 ) -> None:
     if metadata.config_fingerprint != config.fingerprint:
         raise ValueError("Run metadata does not match the experiment configuration.")
-    if len(history.train) != config.training.epochs:
+    completed_epochs = len(history.train)
+    if completed_epochs > config.training.epochs:
         raise ValueError(
-            "Training history must contain exactly the configured number of epochs."
+            "Training history cannot exceed the configured number of epochs."
+        )
+    if history.stopped_early:
+        if completed_epochs >= config.training.epochs:
+            raise ValueError(
+                "An early-stopped history must end before the configured epoch limit."
+            )
+    elif completed_epochs != config.training.epochs:
+        raise ValueError(
+            "Training history must contain exactly the configured number of epochs "
+            "unless early stopping occurred."
         )
 
-    completed_epochs = [checkpoint.completed_epochs for checkpoint in checkpoints]
-    if len(completed_epochs) != len(set(completed_epochs)):
-        raise ValueError("Checkpoint completed_epochs values must be unique.")
+    destinations = [_checkpoint_relative_path(checkpoint) for checkpoint in checkpoints]
+    if len(destinations) != len(set(destinations)):
+        raise ValueError("Checkpoint destinations must be unique.")
     for checkpoint in checkpoints:
         if checkpoint.completed_epochs > len(history.train):
             raise ValueError(
@@ -144,21 +164,33 @@ def _copy_checkpoints(
     checkpoint_dir.mkdir()
     records: list[dict[str, object]] = []
     relative_paths: list[Path] = []
-    for checkpoint in sorted(checkpoints, key=lambda item: item.completed_epochs):
-        relative = Path("checkpoints") / (
-            f"checkpoint-{checkpoint.completed_epochs:04d}.pt"
-        )
+    for checkpoint in sorted(
+        checkpoints,
+        key=lambda item: (item.completed_epochs, item.role or ""),
+    ):
+        relative = _checkpoint_relative_path(checkpoint)
         destination = staging / relative
         shutil.copyfile(checkpoint.source, destination)
         record = _file_record(destination, staging)
         record["completed_epochs"] = checkpoint.completed_epochs
+        if checkpoint.role is not None:
+            record["role"] = checkpoint.role
         records.append(record)
         relative_paths.append(relative)
     return records, tuple(relative_paths)
 
 
+def _checkpoint_relative_path(checkpoint: CheckpointArtifact) -> Path:
+    if checkpoint.role is not None:
+        return Path("checkpoints") / f"{checkpoint.role}.pt"
+    return Path("checkpoints") / (f"checkpoint-{checkpoint.completed_epochs:04d}.pt")
+
+
 def _history_payload(history: TrainingHistory) -> dict[str, object]:
     return {
+        "best_epoch": history.best_epoch,
+        "best_validation_loss": history.best_validation_loss,
+        "stopped_early": history.stopped_early,
         "epochs": [
             {
                 "epoch": index,
@@ -169,7 +201,7 @@ def _history_payload(history: TrainingHistory) -> dict[str, object]:
                 zip(history.train, history.validation, strict=True),
                 start=1,
             )
-        ]
+        ],
     }
 
 

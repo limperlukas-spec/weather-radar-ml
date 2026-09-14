@@ -1,0 +1,17 @@
+seed: 42
+epochs: 50
+batch_size: 4
+device: cpu
+num_workers: 0
+deterministic_algorithms: true
+early_stopping_patience: 7
+
+loss:
+  name: mse
+  parameters: {}
+
+optimizer:
+  name: adam
+  parameters:
+    lr: 0.001
+    weight_decay: 0.0

@@ -122,3 +122,54 @@ def test_trainer_rejects_mismatching_loss_spec() -> None:
             optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
             metric_factory=lambda: ContinuousForecastMetrics(spec),
         )
+
+
+def test_fit_stops_after_configured_validation_patience() -> None:
+    trainer, _ = _trainer(lr=0.0)
+    best_epochs: list[int] = []
+
+    history = trainer.fit(
+        [_batch(1.0, 1.0)],
+        [_batch(1.0, 1.0)],
+        epochs=10,
+        early_stopping_patience=2,
+        on_best_validation=lambda epoch, _: best_epochs.append(epoch),
+    )
+
+    assert len(history.train) == 3
+    assert history.best_epoch == 1
+    assert history.best_validation_loss == pytest.approx(1.0)
+    assert history.stopped_early is True
+    assert best_epochs == [1]
+
+
+def test_trainer_applies_model_space_transforms_but_metrics_stay_physical() -> None:
+    spec = _spec()
+    model = ToyForecast(spec)
+    model.scale.data.fill_(1.0)
+    trainer = ForecastTrainer(
+        model=model,
+        loss=MeanSquaredForecastLoss(spec),
+        optimizer=None,
+        metric_factory=lambda: ContinuousForecastMetrics(spec),
+        input_transform=torch.log1p,
+        target_transform=torch.log1p,
+        metric_prediction_transform=torch.expm1,
+    )
+
+    result = trainer.run_validation_epoch([_batch(3.0, 3.0)])
+
+    assert result.loss == pytest.approx(0.0)
+    assert result.metrics.overall.values["mae"] == pytest.approx(0.0)
+
+
+def test_fit_rejects_non_positive_early_stopping_patience() -> None:
+    trainer, _ = _trainer()
+
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        trainer.fit(
+            [_batch(1.0, 1.0)],
+            [_batch(1.0, 1.0)],
+            epochs=2,
+            early_stopping_patience=0,
+        )

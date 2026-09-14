@@ -8,6 +8,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from weather_radar_ml.models.domain import ModelSpec
+
 
 class UNetForecast(nn.Module):
     """Forecast a fixed number of future radar frames from a radar history.
@@ -19,6 +21,7 @@ class UNetForecast(nn.Module):
 
     def __init__(
         self,
+        spec: ModelSpec | None = None,
         *,
         input_steps: int = 12,
         input_features: int = 1,
@@ -27,10 +30,28 @@ class UNetForecast(nn.Module):
         base_channels: int = 32,
     ) -> None:
         super().__init__()
-        self.input_steps = _positive(input_steps, "input_steps")
-        self.input_features = _positive(input_features, "input_features")
-        self.output_steps = _positive(output_steps, "output_steps")
-        self.output_features = _positive(output_features, "output_features")
+        if spec is None:
+            spec = ModelSpec(
+                name="unet",
+                dynamic_input_features=tuple(
+                    f"dynamic_{index}" for index in range(input_features)
+                ),
+                target_features=tuple(
+                    f"target_{index}" for index in range(output_features)
+                ),
+                history_steps=input_steps,
+                forecast_steps=output_steps,
+            )
+        elif spec.static_input_features:
+            raise ValueError("UNetForecast does not support static inputs in 0.6.")
+
+        self._spec = spec
+        self.input_steps = _positive(spec.history_steps, "input_steps")
+        self.input_features = _positive(
+            len(spec.dynamic_input_features), "input_features"
+        )
+        self.output_steps = _positive(spec.forecast_steps, "output_steps")
+        self.output_features = _positive(len(spec.target_features), "output_features")
         base_channels = _positive(base_channels, "base_channels")
 
         input_channels = self.input_steps * self.input_features
@@ -44,8 +65,19 @@ class UNetForecast(nn.Module):
         self.output_head = nn.Conv2d(base_channels, output_channels, kernel_size=1)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    def forward(self, dynamic_inputs: Tensor) -> Tensor:
+    @property
+    def spec(self) -> ModelSpec:
+        """Return the forecast contract implemented by this U-Net."""
+        return self._spec
+
+    def forward(
+        self,
+        dynamic_inputs: Tensor,
+        static_inputs: Tensor | None = None,
+    ) -> Tensor:
         """Return forecasts using the public ``[B, T, F, H, W]`` contract."""
+        if static_inputs is not None:
+            raise ValueError("UNetForecast does not support static inputs in 0.6.")
         batch_size, height, width = self._validate_input(dynamic_inputs)
         flattened = dynamic_inputs.reshape(
             batch_size,
