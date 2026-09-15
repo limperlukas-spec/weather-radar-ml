@@ -173,3 +173,45 @@ def test_fit_rejects_non_positive_early_stopping_patience() -> None:
             epochs=2,
             early_stopping_patience=0,
         )
+
+
+def test_fit_reports_each_completed_epoch_and_resumes_history() -> None:
+    trainer, _ = _trainer(lr=0.0)
+    reported = []
+
+    first = trainer.fit(
+        [_batch(1.0, 1.0)],
+        [_batch(1.0, 1.0)],
+        epochs=1,
+        on_epoch_end=reported.append,
+    )
+    resumed = trainer.fit(
+        [_batch(1.0, 1.0)],
+        [_batch(1.0, 1.0)],
+        epochs=3,
+        initial_history=first,
+        on_epoch_end=reported.append,
+    )
+
+    assert [len(history.train) for history in reported] == [1, 2, 3]
+    assert len(resumed.train) == 3
+    assert resumed.best_epoch == 1
+
+
+def test_fit_returns_already_complete_initial_history_without_retraining() -> None:
+    trainer, _ = _trainer(lr=0.0)
+    initial = trainer.fit(
+        [_batch(1.0, 1.0)],
+        [_batch(1.0, 1.0)],
+        epochs=1,
+    )
+
+    assert (
+        trainer.fit(
+            [_batch(1.0, 1.0)],
+            [_batch(1.0, 1.0)],
+            epochs=1,
+            initial_history=initial,
+        )
+        is initial
+    )

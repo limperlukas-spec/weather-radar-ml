@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
@@ -30,6 +30,7 @@ from weather_radar_ml.tracking.mlflow import (
     finish_mlflow_parent_run,
     start_mlflow_parent_run,
 )
+from weather_radar_ml.training.domain import TrainingHistory
 from weather_radar_ml.training.forecast_artifact import ForecastArtifactResult
 from weather_radar_ml.training.pipeline import (
     PipelineResult,
@@ -123,6 +124,9 @@ def run_multiseed_experiment(
     *,
     seeds: tuple[int, int, int] = OFFICIAL_MULTI_SEEDS,
     benchmark_split: str = "validation",
+    resume_root: Path | None = None,
+    resume: bool = False,
+    on_progress: Callable[[int, TrainingHistory], None] | None = None,
 ) -> MultiSeedResult:
     """Run three fixed seeds and optionally finalize on the held-out test split."""
     normalized_seeds = _validate_seeds(seeds)
@@ -150,12 +154,31 @@ def run_multiseed_experiment(
                 config,
                 training=replace(config.training, seed=seed),
             )
-            result = run_experiment(
-                child_config,
-                tracking_parent_run_id=(
-                    None if parent is None else parent.mlflow_run_id
-                ),
+            checkpoint_root = (
+                None if resume_root is None else Path(resume_root) / f"seed-{seed}"
             )
+
+            def report_progress(
+                history: TrainingHistory, *, child_seed: int = seed
+            ) -> None:
+                if on_progress is not None:
+                    on_progress(child_seed, history)
+
+            progress = report_progress if on_progress is not None else None
+            parent_run_id = None if parent is None else parent.mlflow_run_id
+            if checkpoint_root is None and not resume and progress is None:
+                result = run_experiment(
+                    child_config,
+                    tracking_parent_run_id=parent_run_id,
+                )
+            else:
+                result = run_experiment(
+                    child_config,
+                    tracking_parent_run_id=parent_run_id,
+                    checkpoint_root=checkpoint_root,
+                    resume=resume,
+                    on_epoch_end=progress,
+                )
             completed.append(SeedRun(seed=seed, result=result))
 
         runs = tuple(completed)
@@ -226,7 +249,7 @@ def run_multiseed_experiment(
             tracking_parent=parent,
             test_research=test_research,
         )
-    except Exception:
+    except BaseException:
         if parent is not None:
             with suppress(Exception):
                 finish_mlflow_parent_run(

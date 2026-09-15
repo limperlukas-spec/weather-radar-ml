@@ -72,6 +72,35 @@ def make_forecast_dataloader(
     return cast(Iterable[ForecastBatch], loader)
 
 
+def forecast_dataloader_generator_state(
+    loader: Iterable[ForecastBatch],
+) -> Tensor:
+    """Return a copy of the deterministic DataLoader generator state."""
+    generator = _dataloader_generator(loader)
+    return generator.get_state().clone()
+
+
+def restore_forecast_dataloader_generator_state(
+    loader: Iterable[ForecastBatch],
+    state: Tensor,
+) -> None:
+    """Restore a previously captured deterministic DataLoader generator state."""
+    if state.ndim != 1 or state.dtype != torch.uint8:
+        raise ValueError(
+            "DataLoader generator state must be a one-dimensional uint8 tensor."
+        )
+    _dataloader_generator(loader).set_state(state.cpu())
+
+
+def _dataloader_generator(loader: Iterable[ForecastBatch]) -> torch.Generator:
+    if not isinstance(loader, DataLoader):
+        raise TypeError("loader must be a torch DataLoader created by this module.")
+    generator = loader.generator
+    if generator is None:
+        raise ValueError("DataLoader has no deterministic generator.")
+    return cast(torch.Generator, generator)
+
+
 def _tensor_value(sample: TorchSample, key: str) -> Tensor:
     value = sample.get(key)
     if not isinstance(value, Tensor):

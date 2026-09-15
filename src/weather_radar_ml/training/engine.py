@@ -19,6 +19,7 @@ from weather_radar_ml.training.domain import EpochResult, ForecastBatch, Trainin
 MetricFactory = Callable[[], ForecastMetricAccumulator]
 TensorTransform = Callable[[Tensor], Tensor]
 BestValidationCallback = Callable[[int, EpochResult], None]
+EpochEndCallback = Callable[[TrainingHistory], None]
 
 
 class ForecastTrainer:
@@ -64,20 +65,36 @@ class ForecastTrainer:
         epochs: int,
         early_stopping_patience: int | None = None,
         on_best_validation: BestValidationCallback | None = None,
+        on_epoch_end: EpochEndCallback | None = None,
+        initial_history: TrainingHistory | None = None,
     ) -> TrainingHistory:
-        """Run matching train/validation passes with optional early stopping."""
+        """Run train/validation passes, optionally resuming completed epochs."""
         if epochs <= 0:
             raise ValueError("epochs must be greater than zero.")
         if early_stopping_patience is not None and early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be greater than zero.")
 
-        train_results: list[EpochResult] = []
-        validation_results: list[EpochResult] = []
-        best_epoch = 0
-        best_validation_loss = float("inf")
-        epochs_without_improvement = 0
+        if initial_history is None:
+            train_results: list[EpochResult] = []
+            validation_results: list[EpochResult] = []
+            best_epoch = 0
+            best_validation_loss = float("inf")
+            epochs_without_improvement = 0
+        else:
+            if initial_history.stopped_early:
+                return initial_history
+            if len(initial_history.train) >= epochs:
+                if len(initial_history.train) == epochs:
+                    return initial_history
+                raise ValueError("initial_history exceeds the configured epoch limit.")
+            train_results = list(initial_history.train)
+            validation_results = list(initial_history.validation)
+            best_epoch = initial_history.best_epoch
+            best_validation_loss = initial_history.best_validation_loss
+            epochs_without_improvement = len(validation_results) - best_epoch
 
-        for epoch in range(1, epochs + 1):
+        start_epoch = len(train_results) + 1
+        for epoch in range(start_epoch, epochs + 1):
             train_results.append(self.run_train_epoch(train_batches))
             validation = self.run_validation_epoch(validation_batches)
             validation_results.append(validation)
@@ -93,18 +110,29 @@ class ForecastTrainer:
             else:
                 epochs_without_improvement += 1
 
-            if (
+            stopped_early = (
                 early_stopping_patience is not None
                 and epochs_without_improvement >= early_stopping_patience
-            ):
-                break
+                and epoch < epochs
+            )
+            history = TrainingHistory(
+                train=tuple(train_results),
+                validation=tuple(validation_results),
+                best_epoch=best_epoch,
+                best_validation_loss=best_validation_loss,
+                stopped_early=stopped_early,
+            )
+            if on_epoch_end is not None:
+                on_epoch_end(history)
+            if stopped_early:
+                return history
 
         return TrainingHistory(
             train=tuple(train_results),
             validation=tuple(validation_results),
             best_epoch=best_epoch,
             best_validation_loss=best_validation_loss,
-            stopped_early=len(train_results) < epochs,
+            stopped_early=False,
         )
 
     def run_train_epoch(self, batches: Iterable[ForecastBatch]) -> EpochResult:

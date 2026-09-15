@@ -6,8 +6,10 @@ import argparse
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
+import torch
 from omegaconf import OmegaConf
 
 from weather_radar_ml.config.experiment import ComponentConfig
@@ -24,7 +26,9 @@ from weather_radar_ml.config.schema import (
     TrainingConfig,
 )
 from weather_radar_ml.data.ml.artifact import plan_ml_dataset_artifact
+from weather_radar_ml.training.domain import TrainingHistory
 from weather_radar_ml.training.multiseed import run_multiseed_experiment
+from weather_radar_ml.training.pipeline import run_experiment
 
 _DEFAULT_DATASET_CONFIG = Path(
     "configs/datasets/radklim_yw_2023_09_dortmund_reference.yaml"
@@ -42,6 +46,17 @@ def main() -> None:
     parser.add_argument("--runs-root", type=Path, default=Path("runs"))
     parser.add_argument("--ml-datasets-root", type=Path, default=Path("data/ml"))
     parser.add_argument(
+        "--resume-root",
+        type=Path,
+        default=Path("runs/.resume-radklim-reference"),
+    )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
         "--tracking",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -54,6 +69,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.num_workers < 0:
         parser.error("--num-workers must not be negative")
+    if args.device == "mps" and not torch.backends.mps.is_available():
+        parser.error("--device mps requested, but MPS is not available")
+    if args.tracking_uri == "sqlite:///mlruns/mlflow.db":
+        Path("mlruns").mkdir(parents=True, exist_ok=True)
 
     dataset = _load_dataset_config(_DEFAULT_DATASET_CONFIG)
     checksums = _load_checksums(_DEFAULT_CHECKSUMS)
@@ -79,7 +98,7 @@ def main() -> None:
         model=ModelConfig(name="unet", parameters={"base_channels": 32}),
         training=TrainingConfig(
             seed=17,
-            epochs=50,
+            epochs=1 if args.smoke else 50,
             batch_size=4,
             device=args.device,
             num_workers=args.num_workers,
@@ -94,12 +113,54 @@ def main() -> None:
         tracking=TrackingConfig(
             uri=args.tracking_uri,
             experiment_name=args.experiment_name,
-            enabled=args.tracking,
+            enabled=args.tracking and not args.smoke,
         ),
         output=OutputConfig(runs_root=args.runs_root),
     )
 
-    result = run_multiseed_experiment(config, benchmark_split="test")
+    started = perf_counter()
+    last_progress = started
+
+    def print_progress(seed: int, history: TrainingHistory) -> None:
+        nonlocal last_progress
+        epoch = len(history.train)
+        train = history.train[-1]
+        validation = history.validation[-1]
+        now = perf_counter()
+        epoch_elapsed = now - last_progress
+        elapsed = now - started
+        last_progress = now
+        print(
+            f"seed={seed} epoch={epoch}/{config.training.epochs} "
+            f"train_loss={train.loss:.6f} "
+            f"validation_loss={validation.loss:.6f} "
+            f"best_epoch={history.best_epoch} "
+            f"best_validation_loss={history.best_validation_loss:.6f} "
+            f"epoch_s={epoch_elapsed:.1f} elapsed_s={elapsed:.1f}",
+            flush=True,
+        )
+
+    print(
+        f"device={args.device} smoke={args.smoke} "
+        f"resume={args.resume and not args.smoke}",
+        flush=True,
+    )
+    if args.smoke:
+        result = run_experiment(
+            config,
+            on_epoch_end=lambda history: print_progress(17, history),
+        )
+        print(f"smoke_run={result.artifact.root}")
+        print(f"smoke_elapsed_s={perf_counter() - started:.1f}")
+        return
+
+    result = run_multiseed_experiment(
+        config,
+        benchmark_split="test",
+        resume_root=args.resume_root,
+        resume=args.resume,
+        on_progress=print_progress,
+    )
     print(f"reference_seed={result.reference_seed}")
     print(f"summary={result.artifact.summary}")
     print(f"forecast_artifact={result.forecast_artifact.root}")

@@ -6,7 +6,8 @@ import hashlib
 import json
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
@@ -46,7 +47,11 @@ from weather_radar_ml.training.artifact import (
     RunArtifactResult,
     write_run_artifact,
 )
-from weather_radar_ml.training.batching import make_forecast_dataloader
+from weather_radar_ml.training.batching import (
+    forecast_dataloader_generator_state,
+    make_forecast_dataloader,
+    restore_forecast_dataloader_generator_state,
+)
 from weather_radar_ml.training.checkpoint import (
     load_training_checkpoint,
     save_training_checkpoint,
@@ -161,8 +166,13 @@ def run_experiment(
     config: RunConfig,
     *,
     tracking_parent_run_id: str | None = None,
+    checkpoint_root: Path | None = None,
+    resume: bool = False,
+    on_epoch_end: Callable[[TrainingHistory], None] | None = None,
 ) -> PipelineResult:
     """Execute one configured experiment and publish its canonical run artifact."""
+    if resume and checkpoint_root is None:
+        raise ValueError("resume=True requires checkpoint_root.")
     data = _build_data_bundle(config)
     try:
         experiment = _experiment_config(config, data)
@@ -202,9 +212,40 @@ def run_experiment(
             git_commit=_git_commit(),
         )
 
-        with tempfile.TemporaryDirectory(prefix="weather-radar-ml-checkpoint-") as tmp:
-            temporary_root = Path(tmp)
-            best_checkpoint = temporary_root / "best.pt"
+        with _checkpoint_workspace(checkpoint_root) as workspace:
+            best_checkpoint = workspace / "best.pt"
+            resume_checkpoint = workspace / "resume.pt"
+            resume_metadata = workspace / "resume.json"
+            initial_history: TrainingHistory | None = None
+
+            if checkpoint_root is not None:
+                _validate_or_write_resume_metadata(
+                    resume_metadata,
+                    experiment_fingerprint=experiment.fingerprint,
+                    git_commit=metadata.git_commit,
+                    resume=resume,
+                )
+
+            if resume and resume_checkpoint.is_file():
+                if optimizer is None:
+                    raise RuntimeError("Resume requires an optimizer.")
+                state = load_training_checkpoint(
+                    resume_checkpoint,
+                    model=model,
+                    optimizer=optimizer,
+                    restore_rng_state=True,
+                )
+                if state.history is None or state.dataloader_generator_state is None:
+                    raise ValueError(
+                        "Resume checkpoint lacks history or DataLoader generator state."
+                    )
+                if not best_checkpoint.is_file():
+                    raise FileNotFoundError(best_checkpoint)
+                initial_history = state.history
+                restore_forecast_dataloader_generator_state(
+                    train_loader,
+                    state.dataloader_generator_state,
+                )
 
             def save_best(epoch: int, _: object) -> None:
                 if optimizer is None:
@@ -216,23 +257,49 @@ def run_experiment(
                     completed_epochs=epoch,
                 )
 
-            history = trainer.fit(
-                train_loader,
-                validation_loader,
-                epochs=config.training.epochs,
-                early_stopping_patience=config.training.early_stopping_patience,
-                on_best_validation=save_best if optimizer is not None else None,
-            )
+            def save_epoch(history: TrainingHistory) -> None:
+                if optimizer is not None:
+                    save_training_checkpoint(
+                        resume_checkpoint,
+                        model=model,
+                        optimizer=optimizer,
+                        completed_epochs=len(history.train),
+                        history=history,
+                        dataloader_generator_state=(
+                            forecast_dataloader_generator_state(train_loader)
+                        ),
+                    )
+                if on_epoch_end is not None:
+                    on_epoch_end(history)
+
+            if initial_history is not None and (
+                initial_history.stopped_early
+                or len(initial_history.train) == config.training.epochs
+            ):
+                history = initial_history
+            else:
+                history = trainer.fit(
+                    train_loader,
+                    validation_loader,
+                    epochs=config.training.epochs,
+                    early_stopping_patience=config.training.early_stopping_patience,
+                    on_best_validation=save_best if optimizer is not None else None,
+                    on_epoch_end=save_epoch,
+                    initial_history=initial_history,
+                )
 
             checkpoints: tuple[CheckpointArtifact, ...] = ()
             if optimizer is not None:
-                last_checkpoint = temporary_root / "last.pt"
                 completed_epochs = len(history.train)
                 save_training_checkpoint(
-                    last_checkpoint,
+                    resume_checkpoint,
                     model=model,
                     optimizer=optimizer,
                     completed_epochs=completed_epochs,
+                    history=history,
+                    dataloader_generator_state=(
+                        forecast_dataloader_generator_state(train_loader)
+                    ),
                 )
                 checkpoints = (
                     CheckpointArtifact(
@@ -241,7 +308,7 @@ def run_experiment(
                         role="best",
                     ),
                     CheckpointArtifact(
-                        last_checkpoint,
+                        resume_checkpoint,
                         completed_epochs=completed_epochs,
                         role="last",
                     ),
@@ -291,6 +358,46 @@ def run_experiment(
         )
     finally:
         data.close()
+
+
+@contextmanager
+def _checkpoint_workspace(path: Path | None) -> Iterator[Path]:
+    if path is None:
+        with tempfile.TemporaryDirectory(
+            prefix="weather-radar-ml-checkpoint-"
+        ) as temporary:
+            yield Path(temporary)
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    yield path
+
+
+def _validate_or_write_resume_metadata(
+    path: Path,
+    *,
+    experiment_fingerprint: str,
+    git_commit: str | None,
+    resume: bool,
+) -> None:
+    expected = {
+        "experiment_fingerprint": experiment_fingerprint,
+        "git_commit": git_commit,
+    }
+    if path.exists():
+        actual = _read_json_mapping(path)
+        if dict(actual) != expected:
+            raise ValueError(
+                "Resume metadata does not match the current experiment or git commit."
+            )
+        if not resume:
+            raise FileExistsError(
+                f"Checkpoint workspace already contains resume metadata: {path}"
+            )
+        return
+    path.write_text(
+        json.dumps(expected, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def evaluate_reference_checkpoint(

@@ -15,7 +15,9 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 
+from weather_radar_ml.evaluation.domain import ForecastMetricReport, MetricSummary
 from weather_radar_ml.models.contracts import ForecastModel
+from weather_radar_ml.training.domain import EpochResult, TrainingHistory
 
 CHECKPOINT_FORMAT_VERSION = 1
 
@@ -25,6 +27,8 @@ class TrainingCheckpointState:
     """Metadata returned after a checkpoint has been restored."""
 
     completed_epochs: int
+    history: TrainingHistory | None = None
+    dataloader_generator_state: Tensor | None = None
     format_version: int = CHECKPOINT_FORMAT_VERSION
 
     def __post_init__(self) -> None:
@@ -38,9 +42,17 @@ def save_training_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     completed_epochs: int,
+    history: TrainingHistory | None = None,
+    dataloader_generator_state: Tensor | None = None,
 ) -> None:
-    """Atomically persist model, optimizer, epoch, and RNG state."""
-    state = TrainingCheckpointState(completed_epochs=completed_epochs)
+    """Atomically persist model, optimizer, epoch, RNG, and optional resume state."""
+    if history is not None and len(history.train) != completed_epochs:
+        raise ValueError("Checkpoint history must match completed_epochs.")
+    state = TrainingCheckpointState(
+        completed_epochs=completed_epochs,
+        history=history,
+        dataloader_generator_state=dataloader_generator_state,
+    )
     forecast_model = _forecast_model(model)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +67,12 @@ def save_training_checkpoint(
         "optimizer_state": optimizer.state_dict(),
         "rng_state": _capture_rng_state(),
     }
+    if history is not None:
+        payload["training_history"] = _history_payload(history)
+    if dataloader_generator_state is not None:
+        payload["dataloader_generator_state"] = (
+            dataloader_generator_state.detach().cpu().clone()
+        )
     _atomic_torch_save(payload, destination)
 
 
@@ -79,8 +97,25 @@ def load_training_checkpoint(
         )
 
     completed_epochs = _require_int(payload, "completed_epochs")
+    history_raw = payload.get("training_history")
+    history = (
+        None
+        if history_raw is None
+        else _history_from_payload(_require_mapping(history_raw, "training_history"))
+    )
+    if history is not None and len(history.train) != completed_epochs:
+        raise ValueError("Checkpoint history does not match completed_epochs.")
+    generator_state_raw = payload.get("dataloader_generator_state")
+    if generator_state_raw is not None and not isinstance(generator_state_raw, Tensor):
+        raise ValueError("dataloader_generator_state must be a tensor.")
     state = TrainingCheckpointState(
         completed_epochs=completed_epochs,
+        history=history,
+        dataloader_generator_state=(
+            None
+            if generator_state_raw is None
+            else generator_state_raw.detach().cpu().clone()
+        ),
         format_version=version,
     )
 
@@ -123,6 +158,7 @@ def _capture_rng_state() -> dict[str, object]:
     )
     numpy_keys_array = np.asarray(numpy_keys, dtype=np.uint32)
     cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
     return {
         "python": {
             "version": python_version,
@@ -138,6 +174,7 @@ def _capture_rng_state() -> dict[str, object]:
         },
         "torch_cpu": torch.get_rng_state(),
         "torch_cuda": cuda_states,
+        "torch_mps": mps_state,
     }
 
 
@@ -192,6 +229,108 @@ def _restore_rng_state(payload: Mapping[str, object]) -> None:
                 "CUDA device count does not match the saved checkpoint RNG state."
             )
         torch.cuda.set_rng_state_all([value.cpu() for value in cuda_states])
+
+    mps_state = payload.get("torch_mps")
+    if mps_state is not None:
+        if not isinstance(mps_state, Tensor):
+            raise ValueError("rng_state.torch_mps must be a tensor or None.")
+        if torch.backends.mps.is_available():
+            torch.mps.set_rng_state(mps_state.cpu())
+
+
+def _history_payload(history: TrainingHistory) -> dict[str, object]:
+    return {
+        "best_epoch": history.best_epoch,
+        "best_validation_loss": history.best_validation_loss,
+        "stopped_early": history.stopped_early,
+        "train": [_epoch_payload(item) for item in history.train],
+        "validation": [_epoch_payload(item) for item in history.validation],
+    }
+
+
+def _history_from_payload(payload: Mapping[str, object]) -> TrainingHistory:
+    train = _epoch_sequence(payload.get("train"), "training_history.train")
+    validation = _epoch_sequence(
+        payload.get("validation"),
+        "training_history.validation",
+    )
+    best_epoch = _require_int(payload, "best_epoch")
+    best_loss = payload.get("best_validation_loss")
+    if isinstance(best_loss, bool) or not isinstance(best_loss, (int, float)):
+        raise ValueError("best_validation_loss must be numeric.")
+    stopped_early = payload.get("stopped_early")
+    if not isinstance(stopped_early, bool):
+        raise ValueError("stopped_early must be boolean.")
+    return TrainingHistory(
+        train=train,
+        validation=validation,
+        best_epoch=best_epoch,
+        best_validation_loss=float(best_loss),
+        stopped_early=stopped_early,
+    )
+
+
+def _epoch_sequence(value: object, name: str) -> tuple[EpochResult, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{name} must be a non-empty list.")
+    return tuple(
+        _epoch_from_payload(_require_mapping(item, f"{name} item")) for item in value
+    )
+
+
+def _epoch_payload(result: EpochResult) -> dict[str, object]:
+    return {
+        "loss": result.loss,
+        "batches": result.batches,
+        "samples": result.samples,
+        "metrics": {
+            "overall": _metric_summary_payload(result.metrics.overall),
+            "per_lead": [
+                _metric_summary_payload(item) for item in result.metrics.per_lead
+            ],
+        },
+    }
+
+
+def _epoch_from_payload(payload: Mapping[str, object]) -> EpochResult:
+    loss = _require_float(payload.get("loss"), "epoch.loss")
+    metrics = _require_mapping(payload.get("metrics"), "epoch.metrics")
+    overall = _metric_summary_from_payload(
+        _require_mapping(metrics.get("overall"), "epoch.metrics.overall")
+    )
+    per_lead_raw = metrics.get("per_lead")
+    if not isinstance(per_lead_raw, list) or not per_lead_raw:
+        raise ValueError("epoch.metrics.per_lead must be a non-empty list.")
+    per_lead = tuple(
+        _metric_summary_from_payload(
+            _require_mapping(item, "epoch.metrics.per_lead item")
+        )
+        for item in per_lead_raw
+    )
+    return EpochResult(
+        loss=loss,
+        metrics=ForecastMetricReport(overall=overall, per_lead=per_lead),
+        batches=_require_int(payload, "batches"),
+        samples=_require_int(payload, "samples"),
+    )
+
+
+def _metric_summary_payload(summary: MetricSummary) -> dict[str, object]:
+    return {"values": dict(summary.values), "count": summary.count}
+
+
+def _metric_summary_from_payload(payload: Mapping[str, object]) -> MetricSummary:
+    values = _require_mapping(payload.get("values"), "metric.values")
+    numeric: dict[str, float] = {}
+    for key, value in values.items():
+        numeric[key] = _require_float(value, f"metric.values.{key}")
+    return MetricSummary(values=numeric, count=_require_int(payload, "count"))
+
+
+def _require_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric.")
+    return float(value)
 
 
 def _atomic_torch_save(payload: object, destination: Path) -> None:

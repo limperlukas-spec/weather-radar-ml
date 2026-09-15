@@ -32,3 +32,16 @@ are validation-only; test evaluation starts only after those choices are fixed.
 Use `--device` to choose the explicitly recorded PyTorch device. Local MLflow
 tracking is enabled for the official run by default; `--no-tracking` is an explicit
 operational opt-out.
+
+Before committing to a long Apple Silicon run, benchmark one real epoch through
+MPS without MLflow or held-out test evaluation:
+
+```bash
+uv run python scripts/run_radklim_yw_reference.py --device mps --smoke --no-tracking
+```
+
+The full runner prints one line per completed epoch and keeps resumable seed
+checkpoints below `runs/.resume-radklim-reference/` by default. A repeated full
+invocation resumes compatible interrupted seed runs. Use `--no-resume` only with
+an empty or different `--resume-root`; an existing workspace is rejected rather
+than overwritten or silently mixed with a different configuration or Git commit.
