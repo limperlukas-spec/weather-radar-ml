@@ -102,7 +102,7 @@ def main() -> None:
             batch_size=4,
             device=args.device,
             num_workers=args.num_workers,
-            deterministic_algorithms=True,
+            deterministic_algorithms=not (args.smoke and args.device == "mps"),
             early_stopping_patience=7,
             loss=ComponentConfig("mse"),
             optimizer=ComponentConfig(
@@ -142,7 +142,8 @@ def main() -> None:
 
     print(
         f"device={args.device} smoke={args.smoke} "
-        f"resume={args.resume and not args.smoke}",
+        f"resume={args.resume and not args.smoke} "
+        f"deterministic_algorithms={config.training.deterministic_algorithms}",
         flush=True,
     )
     if args.smoke:
