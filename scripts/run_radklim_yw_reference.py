@@ -57,6 +57,14 @@ def main() -> None:
     )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
+        "--allow-nondeterministic-mps",
+        action="store_true",
+        help=(
+            "Explicitly allow the official MPS benchmark to run without strict "
+            "deterministic PyTorch algorithms."
+        ),
+    )
+    parser.add_argument(
         "--tracking",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -71,6 +79,13 @@ def main() -> None:
         parser.error("--num-workers must not be negative")
     if args.device == "mps" and not torch.backends.mps.is_available():
         parser.error("--device mps requested, but MPS is not available")
+    if args.allow_nondeterministic_mps and args.device != "mps":
+        parser.error("--allow-nondeterministic-mps requires --device mps")
+    if args.device == "mps" and not args.smoke and not args.allow_nondeterministic_mps:
+        parser.error(
+            "Official MPS reference runs require explicit "
+            "--allow-nondeterministic-mps acknowledgement."
+        )
     if args.tracking_uri == "sqlite:///mlruns/mlflow.db":
         Path("mlruns").mkdir(parents=True, exist_ok=True)
 
@@ -102,7 +117,9 @@ def main() -> None:
             batch_size=4,
             device=args.device,
             num_workers=args.num_workers,
-            deterministic_algorithms=not (args.smoke and args.device == "mps"),
+            deterministic_algorithms=not (
+                args.device == "mps" and (args.smoke or args.allow_nondeterministic_mps)
+            ),
             early_stopping_patience=7,
             loss=ComponentConfig("mse"),
             optimizer=ComponentConfig(
@@ -143,7 +160,8 @@ def main() -> None:
     print(
         f"device={args.device} smoke={args.smoke} "
         f"resume={args.resume and not args.smoke} "
-        f"deterministic_algorithms={config.training.deterministic_algorithms}",
+        f"deterministic_algorithms={config.training.deterministic_algorithms} "
+        f"allow_nondeterministic_mps={args.allow_nondeterministic_mps}",
         flush=True,
     )
     if args.smoke:

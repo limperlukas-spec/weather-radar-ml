@@ -45,3 +45,27 @@ checkpoints below `runs/.resume-radklim-reference/` by default. A repeated full
 invocation resumes compatible interrupted seed runs. Use `--no-resume` only with
 an empty or different `--resume-root`; an existing workspace is rejected rather
 than overwritten or silently mixed with a different configuration or Git commit.
+
+## Apple MPS reference-backend policy
+
+Strict PyTorch determinism remains the default for the official reference
+benchmark. The current Apple MPS backend cannot execute the benchmark backward
+pass with `torch.use_deterministic_algorithms(True)` because the required
+`index_put_with_accumulate_mps` path has no deterministic implementation.
+
+The one-epoch MPS smoke test therefore runs with strict deterministic algorithms
+disabled. A full MPS reference benchmark requires an additional explicit
+acknowledgement instead of silently relaxing the policy:
+
+```bash
+uv run python scripts/run_radklim_yw_reference.py \
+  --device mps \
+  --allow-nondeterministic-mps
+```
+
+The three official seeds, validation-only checkpoint/reference-seed selection,
+held-out test protocol, and all model/data hyperparameters remain unchanged.
+The resulting run configuration and forecast provenance record the MPS device
+and `deterministic_algorithms=false`. Consequently, the run is reproducible as
+a fixed protocol but is not claimed to be bitwise reproducible across repeated
+MPS executions. All three official seeds must use the same backend policy.
