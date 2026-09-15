@@ -702,6 +702,7 @@ def _evaluate_research(
         persistence_input_features=_infer_persistence_mapping(config.data),
     )
     device = torch.device(config.training.device)
+    model.to(device)
     model.eval()
     with torch.no_grad():
         for raw_batch in batches:
