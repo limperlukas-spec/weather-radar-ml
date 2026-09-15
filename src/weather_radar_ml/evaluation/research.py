@@ -223,10 +223,13 @@ class ResearchForecastEvaluator:
         _require_finite_on_mask(persistence, mask, "persistence prediction")
         _require_non_negative(persistence, mask, "persistence prediction")
 
-        learned_physical = learned_physical.to(dtype=torch.float64)
-        persistence = persistence.detach().to(dtype=torch.float64)
-        physical_target = target.detach().to(dtype=torch.float64)
-        mask = mask.to(device=physical_target.device)
+        # Research scoring intentionally uses float64 sufficient statistics.
+        # MPS has no float64 tensors, so normalize detached evaluation values
+        # to CPU before the double-precision scoring path.
+        learned_physical = learned_physical.cpu().to(dtype=torch.float64)
+        persistence = persistence.detach().cpu().to(dtype=torch.float64)
+        physical_target = target.detach().cpu().to(dtype=torch.float64)
+        mask = mask.cpu()
 
         self._all_learned.update(learned_physical, physical_target, mask)
         self._all_persistence.update(persistence, physical_target, mask)

@@ -46,7 +46,10 @@ class ContinuousForecastMetrics:
         _require_finite(prediction, "prediction")
         _require_finite(target, "target")
 
-        error = (prediction.detach() - target.detach()).to(dtype=torch.float64)
+        # MPS cannot represent float64 tensors. Keep model arithmetic on the
+        # originating device, then move the detached error to CPU before the
+        # double-precision sufficient-statistic accumulation.
+        error = (prediction.detach() - target.detach()).cpu().to(dtype=torch.float64)
         absolute = error.abs()
         squared = error.square()
 
