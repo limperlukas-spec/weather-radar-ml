@@ -2,7 +2,7 @@
 
 A reproducible research framework for benchmarking radar-based weather forecasting strategies under consistent data and evaluation conditions.
 
-> **Status:** Training & Experiment Foundation 0.5.
+> **Status:** 0.6 complete — first real RADKLIM learned-forecast reference benchmark.
 
 ## Why this project exists
 
