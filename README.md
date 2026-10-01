@@ -46,6 +46,13 @@ overridden explicitly, for example:
 uv run weather-radar-ml training.seed=7 output.runs_root=./runs
 ```
 
+### AMD GPU on WSL2
+
+A validated Docker environment for AMD ROCm GPU execution under WSL2 is available
+in [`docker/rocm-wsl/`](docker/rocm-wsl/README.md). It provides short commands for
+image builds, GPU verification, quality checks, tests, interactive execution, and
+optional access to a machine-local DVC remote.
+
 ## Quality checks
 
 ```bash

@@ -142,6 +142,25 @@ def _write_existing_artifact(plan, build_report: object) -> None:
     )
 
 
+def test_incomplete_existing_artifact_is_rejected(tmp_path: Path) -> None:
+    config = _config(tmp_path / "source.zarr")
+    plan = plan_ml_dataset_artifact(
+        config=config,
+        source_checksums={"radar": "abc123"},
+        output_root=tmp_path / "out",
+    )
+    plan.paths.root.mkdir(parents=True)
+    plan.paths.catalog.touch()
+    plan.paths.resolved_config.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=r"incomplete.*manifest\.json"):
+        build_ml_dataset_artifact(
+            config=config,
+            source_checksums={"radar": "abc123"},
+            output_root=tmp_path / "out",
+        )
+
+
 def test_existing_manifest_with_wrong_build_id_is_rejected(
     tmp_path: Path,
 ) -> None:
