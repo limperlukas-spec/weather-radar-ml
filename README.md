@@ -2,7 +2,7 @@
 
 A reproducible research framework for benchmarking radar-based weather forecasting strategies under consistent data and evaluation conditions.
 
-> **Status:** 0.6 complete — first real RADKLIM learned-forecast reference benchmark.
+> **Status:** 0.7 in progress — classical nowcasting benchmark against the frozen 0.6 reference.
 
 ## Why this project exists
 
@@ -27,6 +27,16 @@ Requirements: Python 3.11 and [uv](https://docs.astral.sh/uv/).
 uv sync --all-groups
 uv run weather-radar-ml
 ```
+
+The 0.7 classical-nowcasting dependencies are intentionally optional because
+PySTEPS is not required by the existing data, persistence, or U-Net workflows:
+
+```bash
+uv sync --all-groups --extra classical
+```
+
+The lockfile remains the reproducibility boundary for the resolved dependency
+versions used by benchmark runs.
 
 The default command executes a bounded synthetic persistence-baseline run and
 publishes an immutable local run artifact. Its output is similar to:

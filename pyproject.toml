@@ -25,6 +25,11 @@ dependencies = [
 weather-radar-ml = "weather_radar_ml.entrypoints.run:main"
 
 [project.optional-dependencies]
+classical = [
+    "opencv-python-headless>=4.14,<5",
+    "pysteps==1.21.5",
+]
+
 tracking = [
     "mlflow-skinny>=3.16,<4",
 ]

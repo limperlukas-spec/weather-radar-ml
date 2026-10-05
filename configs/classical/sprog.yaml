@@ -1,0 +1,14 @@
+name: sprog
+
+precip_threshold_mm_h: 0.1
+dry_value_db: -15.0
+outval: min
+
+sprog:
+  n_cascade_levels: 6
+  ar_order: 2
+  bandpass_filter: gaussian
+  decomposition_method: fft
+  extrapolation_method: semilagrangian
+  conditional: false
+  probmatching_method: cdf

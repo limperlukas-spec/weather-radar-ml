@@ -53,10 +53,12 @@ Research question:
 > Does the learned U-Net reference provide skill beyond an established
 > motion-based classical nowcasting method, not only beyond persistence?
 
-Planned scope:
+Accepted scope:
 
-- add one established optical-flow / extrapolation nowcasting strategy, with
-  PySTEPS-compatible methodology preferred where practical,
+- use deterministic PySTEPS S-PROG as the official classical comparator,
+- select the motion estimator on validation only from the predeclared set
+  `VET_2`, `LK_2`, `LK_3`, `LK_6`, and `LK_12`,
+- retain pure optical-flow extrapolation as a diagnostic baseline,
 - adapt it through the existing forecast-strategy boundary rather than creating
   a parallel evaluation path,
 - use the same real RADKLIM dataset, ROI, temporal splits, forecast leads, masks,
@@ -64,7 +66,16 @@ Planned scope:
 - compare persistence, classical nowcasting, and U-Net under the same evaluator,
 - keep the held-out test split out of implementation and method-selection
   decisions,
-- persist a reproducible benchmark artifact and qualitative forecast fields.
+- persist the validation selection trace before opening the test split,
+- report per-lead and aggregate continuous/categorical behavior plus predefined
+  diagnostics for intense rain, ROI boundaries, uncertainty, and runtime,
+- treat runtime as hardware-specific and do not claim process-level energy
+  consumption on the current Windows/WSL2/ROCm reference stack,
+- persist a reproducible benchmark artifact and selected qualitative forecast
+  fields.
+
+See `docs/adr/0008-classical-nowcasting-benchmark-contract.md` for the frozen
+method and selection contract.
 
 Completion criteria:
 

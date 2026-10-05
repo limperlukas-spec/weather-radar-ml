@@ -1,0 +1,14 @@
+selection_split: validation
+criterion: log1p_mse
+
+candidates:
+  - method: vet
+    history_frames: 2
+  - method: lucaskanade
+    history_frames: 2
+  - method: lucaskanade
+    history_frames: 3
+  - method: lucaskanade
+    history_frames: 6
+  - method: lucaskanade
+    history_frames: 12
